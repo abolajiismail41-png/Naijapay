@@ -529,7 +529,7 @@ export default function VirtualNumbersAdmin() {
               )}
 
               {updatePricing.isSuccess && (
-                <Banner tone="success">Pricing configuration saved.</Banner>
+                <Banner tone="info">Pricing configuration saved.</Banner>
               )}
 
               <Button
@@ -868,7 +868,7 @@ export default function VirtualNumbersAdmin() {
           )}
 
           {resolveOrder.isSuccess && (
-            <Banner tone="success">
+            <Banner tone="info">
               Resolution request accepted. The order list and report have
               been refreshed. Check the returned order status before taking
               further action.
