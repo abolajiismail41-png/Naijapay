@@ -2,6 +2,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -64,6 +65,18 @@ class Settings(BaseSettings):
     electricity_max_kobo: int = Field(10_000_000, ge=100)     # NGN 100,000 (placeholder)
     inlomax_electricity_enabled: bool = False                  # off until the adapter is verified against their sandbox
     inlomax_tv_enabled: bool = False                           # off until smartcard + purchase mappings are verified
+
+    # SMS-Man Virtual Numbers. Disabled by default; NGN conversion must be explicitly configured.
+    smsman_enabled: bool = False
+    smsman_api_key: SecretStr = SecretStr("")
+    smsman_base_url: str = "https://api.sms-man.com/control"
+    smsman_currency: Literal["USD", "EUR", "RUB"] = "USD"
+    smsman_ngn_per_unit: Decimal = Decimal("0")
+    smsman_markup_percent: Decimal = Decimal("15")
+    smsman_fixed_fee_kobo: int = Field(0, ge=0)
+    smsman_min_price_kobo: int = Field(100, ge=1)
+    smsman_max_price_kobo: int = Field(5_000_000, ge=1)
+    esim_enabled: bool = False  # disabled until SMS-Man provides a verified eSIM API contract
     inlomax_meter_verify_path: str = "/validatemeter"          # UNVERIFIED path
     inlomax_electricity_path: str = "/electricity"             # UNVERIFIED path
     meter_validation_ttl_s: int = Field(900, ge=60)
@@ -104,6 +117,11 @@ class Settings(BaseSettings):
     def _reject_weak_secrets_outside_local(self) -> "Settings":
         if self.smtp_username and not self.smtp_starttls:
             raise ValueError("SMTP credentials require STARTTLS")
+        if self.smsman_enabled and (not self.smsman_api_key.get_secret_value() or self.smsman_ngn_per_unit <= 0):
+            raise ValueError("SMS-MAN-ENABLED requires SMSMAN_API_KEY and a positive SMSMAN_NGN_PER_UNIT conversion rate")
+        parsed_smsman_url = urlparse(self.smsman_base_url)
+        if self.smsman_enabled and (parsed_smsman_url.scheme != "https" or parsed_smsman_url.hostname != "api.sms-man.com"):
+            raise ValueError("Enabled SMS-Man integration must use the official HTTPS API host")
         if self.environment in (Environment.LOCAL, Environment.TEST):
             return self
         for name in ("jwt_secret", "encryption_key", "webhook_secret"):

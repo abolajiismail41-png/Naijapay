@@ -20,3 +20,5 @@ from app.modules.promotions import models as _promotions  # noqa: F401
 
 from app.modules.fraud import models as _fraud  # noqa: F401
 from app.modules.reconciliation import models as _reconciliation  # noqa: F401
+
+from app.modules.virtual_numbers import models as _virtual_numbers  # noqa: F401

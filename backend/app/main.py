@@ -40,6 +40,8 @@ from app.modules.users.api import router as users_router
 from app.modules.wallet.api import router as wallet_router
 from app.modules.fraud.api import router as fraud_router
 from app.modules.reconciliation.api import router as reconciliation_router
+from app.modules.virtual_numbers.api import router as virtual_numbers_router, admin_router as virtual_numbers_admin_router
+from app.modules.esim.api import router as esim_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -106,6 +108,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_operations_router)
     app.include_router(fraud_router)
     app.include_router(reconciliation_router)
+    app.include_router(virtual_numbers_router)
+    app.include_router(virtual_numbers_admin_router)
+    app.include_router(esim_router)
     if settings.environment is Environment.LOCAL and settings.payment_processor == "sandbox":
         from app.modules.payments.dev_api import router as dev_router
         app.include_router(dev_router)  # local sandbox helper, never mounted elsewhere

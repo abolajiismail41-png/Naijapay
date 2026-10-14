@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.deps import get_app_settings, get_db, get_redis, ok
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.core.money import Money
 from app.modules.auth.deps import Principal, require_permission
 from app.modules.auth.rbac import Permission, has_permission
@@ -146,6 +146,9 @@ async def resolve(
         settings,
         request.app.state.bill_providers,
     )
+    existing = (await db.execute(select(Transaction).where(Transaction.reference == reference))).scalar_one_or_none()
+    if existing is not None and existing.service_type == "VNUMBER":
+        raise ConflictError("Virtual number orders must be reconciled from Virtual Numbers administration with provider evidence.")
 
     transaction = await svc.resolve_manually(
         reference,

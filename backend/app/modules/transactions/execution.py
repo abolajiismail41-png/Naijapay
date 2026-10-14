@@ -59,6 +59,10 @@ class TransactionService:
     # ---------- send ----------
     async def execute(self, txn_id: uuid.UUID) -> Transaction:
         txn = await self._lock(txn_id)
+        # SMS-Man Virtual Numbers are orchestrated by their dedicated adapter, not bill providers.
+        if txn.service_type == "VNUMBER":
+            await self.db.commit()
+            return txn
         if txn.status != TxnStatus.PENDING.value:
             await self.db.commit()
             return txn
@@ -102,6 +106,8 @@ class TransactionService:
 
     async def verify(self, txn_id: uuid.UUID) -> Transaction:
         txn = await self.db.get(Transaction, txn_id, populate_existing=True)
+        if txn is not None and txn.service_type == "VNUMBER":
+            return txn
         if txn is None or not txn.provider_reference or txn.status not in (
                 TxnStatus.PROCESSING.value, TxnStatus.UNKNOWN.value, TxnStatus.REFUNDED.value, TxnStatus.FAILED.value):
             return txn  # type: ignore[return-value]
