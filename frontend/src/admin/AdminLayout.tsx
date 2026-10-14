@@ -20,6 +20,7 @@ export default function AdminLayout() {
         {finance && <NavLink className="tab" to="/admin/profit">Profit</NavLink>}
         {finance && <NavLink className="tab" to="/admin/pricing">Pricing</NavLink>}
         {finance && <NavLink className="tab" to="/admin/catalogue">Catalogue</NavLink>}
+        {(me.role === "ADMIN" || me.role === "SUPER_ADMIN" || finance) && <NavLink className="tab" to="/admin/virtual-numbers">Virtual Numbers & eSIM</NavLink>}
         {userOps && <NavLink className="tab" to="/admin/overview">Overview</NavLink>}
         {userOps && <NavLink className="tab" to="/admin/users">Users</NavLink>}
         {finance && <NavLink className="tab" to="/admin/promotions">Promotions</NavLink>}

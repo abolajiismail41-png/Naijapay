@@ -24,7 +24,7 @@ interface Props {
 
 /**
  * Review -> PIN -> submit. Money safety rules live here:
- * - one idempotency key per attempt, kept across network failures so a retry can never charge twice;
+ * - one idempotency key per attempt, kept across network failures AND client timeouts so a retry can never charge twice;
  * - the PIN is exchanged for a short-lived single-use token, never sent with the purchase itself;
  * - nothing is shown as successful here: we hand over to the transaction page, which shows the server's status.
  */
@@ -77,6 +77,9 @@ export function ReviewSheet({ open, onClose, title, lines, total, note, submit, 
       case "price_changed": onClose(); onPriceChanged?.(e.message); return;
       case "insufficient_funds": setNeedFunds(true); setError(e.message); return;
       case "network_error": setError("Connection problem. Your payment may have gone through: check Activity before trying again."); return; // key is kept
+      // The client gave up waiting, but the server may still be completing the purchase. Keep the
+      // idempotency key (never mint a new one here) so a retry returns the same order instead of a second charge.
+      case "request_timeout": setError("This is taking longer than expected and your order may still be processing. Check Activity before trying again."); return; // key is kept
       default:
         if (e.status >= 500) setError(`${friendly(e)} Check Activity before trying again.`); // key is kept
         else { setError(friendly(e)); key.current = newKey(); }
@@ -108,7 +111,7 @@ export function ReviewSheet({ open, onClose, title, lines, total, note, submit, 
           <>
             <p className="muted">Enter the 4-digit PIN you use for payments.</p>
             <PinPad key={pinKey} value={pin} onChange={setPin} disabled={busy} onComplete={(v) => void run(v, false)} />
-            {busy && <p className="center muted small" role="status">Placing your order…</p>}
+            {busy && <p className="center muted small" role="status">Placing your order… this can take up to a minute. Please keep this page open.</p>}
             {error && <Banner tone="error"><span>{error}{needFunds && <> <Link to="/fund">Add money</Link></>}</span></Banner>}
             <Button block variant="ghost" disabled={busy} onClick={() => { setStage("review"); setError(null); }}>Back</Button>
           </>

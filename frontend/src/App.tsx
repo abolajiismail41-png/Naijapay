@@ -38,6 +38,9 @@ const TransactionDetail = lazy(
 const TV = lazy(() => import("./pages/TV"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Rewards = lazy(() => import("./pages/Rewards"));
+const VirtualNumbers = lazy(() => import("./pages/VirtualNumbers"));
+const Esim = lazy(() => import("./pages/Esim"));
+const VirtualNumbersAdmin = lazy(() => import("./admin/VirtualNumbersAdmin"));
 
 const wait = (element: ReactElement) => (
   <Suspense fallback={<Spinner />}>{element}</Suspense>
@@ -78,6 +81,8 @@ export default function App() {
         />
         <Route path="/pay/exam-pins" element={wait(<ExamPins />)} />
         <Route path="/pay/tv" element={wait(<TV />)} />
+        <Route path="/pay/virtual-numbers" element={wait(<VirtualNumbers />)} />
+        <Route path="/pay/esim" element={wait(<Esim />)} />
 
         {/* Wallet funding */}
         <Route path="/fund" element={wait(<Fund />)} />
@@ -122,6 +127,7 @@ export default function App() {
             element={wait(<PromotionsAdmin />)}
           />
           <Route path="risk" element={wait(<RiskOperations />)} />
+          <Route path="virtual-numbers" element={wait(<VirtualNumbersAdmin />)} />
         </Route>
       </Route>
 

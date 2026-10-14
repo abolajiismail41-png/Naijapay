@@ -18,6 +18,8 @@ export interface TokenPair { access_token: string; refresh_token: string; token_
 
 const REFRESH_KEY = "np.refresh";
 const REQUEST_TIMEOUT_MS = 20_000;
+/** For calls that wait on a slow upstream provider (e.g. SMS-Man price lookups and purchases). */
+export const SLOW_REQUEST_TIMEOUT_MS = 90_000;
 let access: string | null = null;
 let refreshing: Promise<boolean> | null = null;
 let authLost: (() => void) | null = null;
@@ -41,6 +43,8 @@ export interface Opts {
   idempotencyKey?: string;
   pinToken?: string;
   signal?: AbortSignal;
+  /** Overrides the default 20s timeout. Use SLOW_REQUEST_TIMEOUT_MS for provider-backed calls. */
+  timeoutMs?: number;
 }
 
 function url(path: string, query?: Opts["query"]): string {
@@ -60,7 +64,8 @@ async function send(method: string, path: string, o: Opts, token: string | null)
   const onCallerAbort = () => controller.abort(o.signal?.reason);
   if (o.signal?.aborted) onCallerAbort();
   else o.signal?.addEventListener("abort", onCallerAbort, { once: true });
-  const timeout = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), REQUEST_TIMEOUT_MS);
+  const timeoutMs = o.timeoutMs !== undefined && o.timeoutMs > 0 ? o.timeoutMs : REQUEST_TIMEOUT_MS;
+  const timeout = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), timeoutMs);
   try {
     return await fetch(url(path, o.query), {
       method, headers, signal: controller.signal, cache: "no-store",
