@@ -31,6 +31,12 @@ log = logging.getLogger(__name__)
 _FINAL = {PaymentStatus.SUCCESSFUL.value, PaymentStatus.MISMATCH.value}
 _OPEN = (PaymentStatus.INITIATED.value, PaymentStatus.PENDING.value)
 
+# Customers are not charged a funding fee: they pay exactly the amount they ask to add and the wallet
+# is credited that same amount. Paystack's own charge is absorbed by the business (it is deducted from
+# settlement, and recorded per payment in the audit log as `processor_fee_kobo`).
+# Set to True to charge customers the fee computed by FundingFeePolicy again.
+CHARGE_FUNDING_FEE = False
+
 
 @dataclass(frozen=True)
 class Quote:
@@ -63,7 +69,8 @@ class FundingService:
                 f"You can fund between NGN {Money(s.funding_min_kobo).naira:,.0f} "
                 f"and NGN {Money(s.funding_max_kobo).naira:,.0f} at a time.")
         amount = Money(amount_kobo)
-        return Quote(amount, self.fees.fee_for(amount))
+        fee = self.fees.fee_for(amount) if CHARGE_FUNDING_FEE else Money(0)
+        return Quote(amount, fee)
 
     async def initiate(self, user: User, amount_kobo: int, idempotency_key: str) -> Payment:
         quote = self.quote(amount_kobo)
@@ -113,7 +120,7 @@ class FundingService:
             await self.db.commit()  # persist intent BEFORE calling out; never hold a lock during HTTP
             try:
                 init = await self.processor.initialize(
-                    reference=proc_ref, amount_kobo=quote.total.kobo, email=email,
+                    reference=proc_ref, amount_kobo=payment.charged_kobo, email=email,
                     callback_url=self.settings.paystack_callback_url,
                     metadata={"payment_reference": payment.reference, "purpose": "WALLET_FUNDING"})
             except ProcessorRejectedError:
@@ -198,7 +205,11 @@ class FundingService:
             payment.journal_reference, payment.failure_reason = f"funding:{payment.reference}", None
             audit.record(self.db, action="payment.credited", actor_user_id=payment.user_id,
                          resource_type="payment", resource_id=payment.reference,
-                         meta={"amount_kobo": payment.amount_kobo, "fee_kobo": payment.fee_kobo, "source": source})
+                         # `processor_fee_kobo` is what Paystack charges the business for this payment
+                         # (None if the processor did not report it). getattr keeps this safe until the
+                         # Verification class gains the `fees_kobo` field.
+                         meta={"amount_kobo": payment.amount_kobo, "fee_kobo": payment.fee_kobo,
+                               "processor_fee_kobo": getattr(v, "fees_kobo", None), "source": source})
             await record_notification(self.db, user_id=payment.user_id,
                 event_key=f"payment:{payment.reference}:SUCCESSFUL", category="WALLET",
                 title="Wallet funded", body=f"Your wallet has been credited with NGN {Money(payment.amount_kobo).naira_str()}.",
