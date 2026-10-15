@@ -29,6 +29,9 @@ class Verification:
     currency: str | None = None
     transaction_id: str | None = None
     paid_at: datetime | None = None
+    # The processor's own charge for this payment, in kobo (None when it did not report one).
+    # Informational only: it is deducted from the business's settlement, never from the customer.
+    fees_kobo: int | None = None
 
 
 class PaymentProcessor(Protocol):
