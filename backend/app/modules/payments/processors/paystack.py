@@ -17,6 +17,13 @@ _STATUS_MAP = {"success": VerifyStatus.SUCCESS, "failed": VerifyStatus.FAILED,
 _VERIFY_ATTEMPTS = 3
 
 
+def _kobo_or_none(value: Any) -> int | None:
+    """A non-negative integer number of kobo, or None when Paystack did not report one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 class PaystackProcessor:
     name = "paystack"
 
@@ -96,7 +103,10 @@ class PaystackProcessor:
                 status=_STATUS_MAP.get(str(data["status"]).lower(), VerifyStatus.PENDING),
                 reference=str(data["reference"]), amount_kobo=amount,
                 currency=str(data.get("currency", "")), transaction_id=str(data["id"]),
-                paid_at=datetime.fromisoformat(paid.replace("Z", "+00:00")) if paid else None)
+                paid_at=datetime.fromisoformat(paid.replace("Z", "+00:00")) if paid else None,
+                # Paystack's own charge for this payment, in kobo. Informational: it is deducted from
+                # the business's settlement, not from the customer. None when Paystack did not report it.
+                fees_kobo=_kobo_or_none(data.get("fees")))
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ProcessorUnavailableError(error="bad_verify_response") from exc
 
