@@ -1,14 +1,13 @@
 import json
 import logging
 import re
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 
 from app.core.money import Money
-from dataclasses import replace
-
 from app.modules.providers.base import (
     AirtimeRequest, CostEntry, DataPlanEntry, DataRequest, ElectricityEntry, ElectricityRequest, EducationRequest, MeterInfo,
     Outcome, ProviderResult, TVCustomerInfo, TVPlanEntry, TVRequest,
@@ -18,6 +17,12 @@ from app.modules.providers.errors import MeterInvalidError, ProviderUnavailableE
 log = logging.getLogger(__name__)
 _NOISE_WORDS = {"prepaid", "postpaid", "electric", "electricity", "distribution", "company", "payment", "plc", "disco"}
 _OUTCOMES = {"success": Outcome.SUCCESS, "failed": Outcome.FAILED, "processing": Outcome.PROCESSING}
+
+# Exam PINs. Inlomax documents data.pins[] of {pin, serialNo}, but the live shape is not guaranteed, so the
+# parser also accepts alternative key names, a list of bare strings, and a single top-level PIN.
+_PIN_KEYS = ("pin", "PIN", "Pin", "pinCode", "pin_code", "code", "voucher")
+_SERIAL_KEYS = ("serialNo", "serialNumber", "serial_no", "serial", "serialno", "SerialNo", "sn")
+_MAX_PINS = 100  # matches the largest quantity the education API accepts
 
 
 def _money(value: Any) -> Money | None:
@@ -30,12 +35,17 @@ def _money(value: Any) -> Money | None:
         return None
 
 
-def _first(data: dict[str, Any], *keys: str) -> str:
+def _first_of(data: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """First non-empty string/int value among `keys` (bools are not values), stripped."""
     for k in keys:
         v = data.get(k)
-        if isinstance(v, (str, int)) and str(v).strip():
+        if isinstance(v, (str, int)) and not isinstance(v, bool) and str(v).strip():
             return str(v).strip()
     return ""
+
+
+def _first(data: dict[str, Any], *keys: str) -> str:
+    return _first_of(data, keys)
 
 
 def _token(data: dict[str, Any]) -> str | None:
@@ -44,14 +54,46 @@ def _token(data: dict[str, Any]) -> str | None:
 
 
 def _pins(data: dict[str, Any]) -> tuple[tuple[str, str], ...] | None:
-    rows = data.get("pins")
+    """Return ((pin, serial), ...) or None when the response carries no PINs.
+
+    Accepts: pins as a list of objects, a list of bare strings/ints, a dict of PINs, a single string,
+    or a single PIN at the top level of `data`. Values are stripped because the provider pads them.
+    """
+    rows: Any = data.get("pins")
+    if rows is None and any(k in data for k in _PIN_KEYS):
+        rows = [data]  # one PIN at the top level
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    if isinstance(rows, (str, int)) and not isinstance(rows, bool) and str(rows).strip():
+        rows = [str(rows)]
     if not isinstance(rows, list):
         return None
-    out = []
-    for r in rows[:20]:
-        if isinstance(r, dict) and str(r.get("pin", "")).strip():   # the provider pads values with spaces
-            out.append((str(r["pin"]).strip()[:60], str(r.get("serialNo", r.get("serial", ""))).strip()[:60]))
+    out: list[tuple[str, str]] = []
+    for r in rows[:_MAX_PINS]:
+        if isinstance(r, (str, int)) and not isinstance(r, bool):
+            pin, serial = str(r).strip(), ""
+        elif isinstance(r, dict):
+            pin, serial = _first_of(r, _PIN_KEYS), _first_of(r, _SERIAL_KEYS)
+        else:
+            continue
+        if pin:
+            out.append((pin[:60], serial[:60]))
     return tuple(out) or None
+
+
+def _log_education_shape(payload: dict[str, Any], data: dict[str, Any]) -> None:
+    """Log the STRUCTURE of an exam-pin response (key names and counts), never any value.
+
+    This is how an unexpected provider shape is diagnosed without writing PINs to the logs.
+    """
+    rows = data.get("pins")
+    first = rows[0] if isinstance(rows, list) and rows else None
+    log.info(
+        "inlomax_education_shape top_keys=%s data_keys=%s pins_type=%s pins_count=%s first_item=%s",
+        sorted(str(k) for k in payload.keys()), sorted(str(k) for k in data.keys()),
+        type(rows).__name__, len(rows) if isinstance(rows, list) else None,
+        sorted(str(k) for k in first.keys()) if isinstance(first, dict) else type(first).__name__,
+    )
 
 
 def _parse(text: str) -> dict[str, Any] | None:
@@ -78,18 +120,22 @@ class InlomaxProvider:
         return {"Authorization": f"Token {self._key}", "Content-Type": "application/json"}
 
     @staticmethod
-    def _to_result(resp: httpx.Response) -> ProviderResult:
+    def _to_result(resp: httpx.Response, *, log_shape: bool = False) -> ProviderResult:
         if resp.status_code >= 500:
             return ProviderResult(Outcome.UNKNOWN, message=f"http_{resp.status_code}", http_status=resp.status_code)
         payload = _parse(resp.text)
         if payload is None:
             return ProviderResult(Outcome.UNKNOWN, message="unparseable_response", http_status=resp.status_code)
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        if log_shape:
+            _log_education_shape(payload, data)
         raw = str(data.get("status") or payload.get("status") or "").lower()
         outcome = _OUTCOMES.get(raw, Outcome.UNKNOWN)  # anything unrecognised is NOT treated as failure
-        ref = data.get("reference")
+        # Inlomax's own reference. Some responses carry it inside `data`, others at the top level; without
+        # it a later status check or PIN recovery has nothing to look up.
+        ref = data.get("reference") if data.get("reference") else payload.get("reference")
         return ProviderResult(
-            outcome, str(ref)[:80] if isinstance(ref, (str, int)) and str(ref) else None,
+            outcome, str(ref)[:80] if isinstance(ref, (str, int)) and not isinstance(ref, bool) and str(ref) else None,
             _money(data.get("amount")), _money(data.get("amountCharged")),
             str(payload.get("message", ""))[:200] if outcome is not Outcome.SUCCESS else "", resp.status_code,
             token=_token(data), units=_first(data, "units", "unit", "kwh")[:20] or None, pins=_pins(data))
@@ -276,7 +322,7 @@ class InlomaxProvider:
             resp = await self._c.post(f"{self._base}/education", json=body, headers=self._h())
         except httpx.HTTPError as exc:
             return ProviderResult(Outcome.UNKNOWN, message=type(exc).__name__)
-        r = self._to_result(resp)
+        r = self._to_result(resp, log_shape=True)  # logs response structure only, never PIN values
         if r.outcome is Outcome.SUCCESS and r.amount_charged is None:
             r = replace(r, amount_charged=r.amount, amount=None)   # `amount` is what we were charged (see docs/providers-inlomax.md)
         return r
