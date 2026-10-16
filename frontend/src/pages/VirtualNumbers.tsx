@@ -73,9 +73,17 @@ type Order = {
   refund_status?: string | null;
   failure_reason?: string | null;
   created_at: string;
-  /** ISO time after which the number stops waiting for a code. */
+  /** When the provider assigned the number. */
+  assigned_at?: string | null;
+  /** After this time the number stops waiting for a code. */
   expires_at?: string | null;
+  /** Server clock: first moment the customer may cancel. Preferred. */
+  cancel_available_at?: string | null;
 };
+
+// The purchase response should carry the new order's id so the page can
+// open it straight away.
+type PurchaseResult = Txn & { order_id?: string | null };
 
 type PricedService = {
   service: Service;
@@ -94,10 +102,6 @@ const MAX_POPULAR_RESULTS = 12;
 const ROW_HEIGHT = 56;
 const VISIBLE_ROWS = 6;
 
-// How often the orders list refreshes while something is in flight.
-const WAITING_POLL_MS = 5_000;
-const CONFIRMING_POLL_MS = 10_000;
-
 // Services shown first, before the customer types anything.
 const POPULAR_SERVICES = [
   "whatsapp",
@@ -114,10 +118,17 @@ const POPULAR_SERVICES = [
   "tinder",
 ];
 
-// Calls that wait on the SMS-Man API (price lookups, purchase, cancel) can
+// Calls that wait on the SMS-Man API (price lookups, purchase) can
 // take far longer than the client's 20s default, so they use the
 // slow-request timeout. Everything else keeps the default.
 const SLOW = { timeoutMs: SLOW_REQUEST_TIMEOUT_MS };
+
+// The customer can cancel only after this long without a code.
+const CANCEL_AFTER_MS = 2 * 60 * 1000;
+
+// How often the orders list refreshes while something is in flight.
+const WAITING_POLL_MS = 5_000;
+const CONFIRMING_POLL_MS = 10_000;
 
 /* ------------------------------------------------------------------ */
 /* Styles                                                              */
@@ -147,6 +158,73 @@ function normaliseStatus(status: string): string {
   return status.trim().toUpperCase();
 }
 
+// A code has arrived. From this point the order is final: no cancel, no
+// refund. The backend enforces the same rule; this only drives the UI.
+function hasCode(order: Order): boolean {
+  return (
+    Boolean(order.sms_code) ||
+    normaliseStatus(order.status) === "SMS_RECEIVED"
+  );
+}
+
+// Number assigned, money held, still waiting for the code.
+function isWaiting(order: Order): boolean {
+  return normaliseStatus(order.status) === "ACTIVE" && !hasCode(order);
+}
+
+// Purchase still in flight or being confirmed with the provider.
+function isConfirming(order: Order): boolean {
+  const status = normaliseStatus(order.status);
+
+  return status === "UNKNOWN" || status === "PENDING";
+}
+
+function badgeStatus(order: Order): string {
+  if (hasCode(order)) return "SUCCESSFUL";
+  if (isWaiting(order) || isConfirming(order)) return "PENDING";
+
+  return normaliseStatus(order.status);
+}
+
+// Epoch ms when cancelling opens, or null if it cannot be worked out.
+function cancelOpensAt(order: Order): number | null {
+  const explicit = order.cancel_available_at
+    ? new Date(order.cancel_available_at).getTime()
+    : NaN;
+
+  if (!Number.isNaN(explicit)) return explicit;
+
+  const start = new Date(order.assigned_at ?? order.created_at).getTime();
+
+  return Number.isNaN(start) ? null : start + CANCEL_AFTER_MS;
+}
+
+// 125000 -> "2:05"
+function formatClock(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const mm = Math.floor(total / 60);
+  const ss = String(total % 60).padStart(2, "0");
+
+  return `${mm}:${ss}`;
+}
+
+// Current time, ticking once a second only while `active`.
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+
+    setNow(Date.now());
+
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+
+    return () => window.clearInterval(id);
+  }, [active]);
+
+  return now;
+}
+
 function stockLabel(price: Price): string {
   if (price.available === true) {
     return price.inventory == null
@@ -174,34 +252,6 @@ function isPopular(name: string): boolean {
   const value = name.toLowerCase();
 
   return POPULAR_SERVICES.some((item) => value.includes(item));
-}
-
-// A code has arrived. From this point the order is final: no cancel, no
-// refund. The backend enforces the same rule; this only drives the UI.
-function hasCode(order: Order): boolean {
-  return (
-    Boolean(order.sms_code) ||
-    normaliseStatus(order.status) === "SMS_RECEIVED"
-  );
-}
-
-// Number assigned, money held, still waiting for the code.
-function isWaiting(order: Order): boolean {
-  return normaliseStatus(order.status) === "ACTIVE" && !hasCode(order);
-}
-
-// Purchase still in flight or being confirmed with the provider.
-function isConfirming(order: Order): boolean {
-  const status = normaliseStatus(order.status);
-
-  return status === "UNKNOWN" || status === "PENDING";
-}
-
-function badgeStatus(order: Order): string {
-  if (hasCode(order)) return "SUCCESSFUL";
-  if (isWaiting(order) || isConfirming(order)) return "PENDING";
-
-  return normaliseStatus(order.status);
 }
 
 /* ------------------------------------------------------------------ */
@@ -409,61 +459,15 @@ function SummaryRow({
   );
 }
 
-// Ticks once a second, only while mounted (i.e. while an order is waiting).
-function Countdown({ expiresAt }: { expiresAt: string }) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-
-    return () => window.clearInterval(id);
-  }, []);
-
-  const end = new Date(expiresAt).getTime();
-
-  if (Number.isNaN(end)) return null;
-
-  const seconds = Math.max(0, Math.floor((end - now) / 1000));
-
-  if (seconds === 0) {
-    return <span className="muted small">Time is up. Updating…</span>;
-  }
-
-  const mm = Math.floor(seconds / 60);
-  const ss = String(seconds % 60).padStart(2, "0");
-
-  return (
-    <span className="muted small">
-      Time left: <strong className="num">{`${mm}:${ss}`}</strong>
-    </span>
-  );
-}
-
-function OrderCard({
+function OrderRow({
   order,
-  checking,
-  cancelling,
-  onCheck,
-  onCancel,
-  onCopy,
+  onOpen,
 }: {
   order: Order;
-  checking: boolean;
-  cancelling: boolean;
-  onCheck: () => void;
-  onCancel: () => void;
-  onCopy: (value: string, message: string) => void;
+  onOpen: () => void;
 }) {
-  const status = normaliseStatus(order.status);
-  const received = hasCode(order);
   const waiting = isWaiting(order);
   const confirming = isConfirming(order);
-  const refunded = order.refund_status === "REFUNDED";
-
-  // A code makes the order final, so cancel only exists while waiting.
-  const canCancel = Boolean(order.phone_number) && waiting;
-  const canCopyNumber =
-    Boolean(order.phone_number) && (waiting || received);
 
   return (
     <article className="card stack-sm">
@@ -485,49 +489,178 @@ function OrderCard({
         {order.service_name} · {order.country_name}
       </span>
 
-      <div className="row between">
+      {order.sms_code && (
+        <div className="banner info">
+          Verification code: <strong>{order.sms_code}</strong>
+        </div>
+      )}
+
+      {waiting && (
+        <span className="muted small">Waiting for the code…</span>
+      )}
+
+      {confirming && (
+        <span className="muted small">
+          Confirming with the provider. Please do not buy again yet.
+        </span>
+      )}
+
+      {hasCode(order) && !order.sms_code && (
+        <span className="muted small">Code received.</span>
+      )}
+
+      <div
+        className="row between"
+        style={{ alignItems: "center", gap: 12 }}
+      >
         <span className="muted xs">
-          {new Date(order.created_at).toLocaleString()}
+          {new Date(order.created_at).toLocaleString()} ·{" "}
+          {formatKobo(order.price_kobo)}
         </span>
 
-        <strong className="num">{formatKobo(order.price_kobo)}</strong>
+        <Button sm variant="secondary" onClick={onOpen}>
+          Open
+        </Button>
       </div>
+    </article>
+  );
+}
 
-      {/* ---- Code received: final ---- */}
+function NumberView({
+  order,
+  loading,
+  refreshing,
+  cancelling,
+  onBack,
+  onRefresh,
+  onCancel,
+  onCopy,
+}: {
+  order: Order | undefined;
+  loading: boolean;
+  refreshing: boolean;
+  cancelling: boolean;
+  onBack: () => void;
+  onRefresh: () => void;
+  onCancel: () => void;
+  onCopy: (value: string, message: string) => void;
+}) {
+  const waiting = order ? isWaiting(order) : false;
+  const now = useNow(waiting);
+
+  const backButton = (
+    <div>
+      <Button sm variant="secondary" onClick={onBack}>
+        Back to numbers
+      </Button>
+    </div>
+  );
+
+  if (!order) {
+    return (
+      <>
+        <PageHead
+          title="Your number"
+          sub="Get a temporary number to receive a verification code."
+          back="/pay"
+        />
+
+        {backButton}
+
+        {loading ? (
+          <Skeleton h={160} />
+        ) : (
+          <Empty title="Number not found">
+            It may still be loading. Go back and open it from My
+            numbers.
+          </Empty>
+        )}
+      </>
+    );
+  }
+
+  const status = normaliseStatus(order.status);
+  const received = hasCode(order);
+  const confirming = isConfirming(order);
+  const refunded = order.refund_status === "REFUNDED";
+
+  const opensAt = cancelOpensAt(order);
+  const cancelWaitMs = opensAt === null ? 0 : opensAt - now;
+  const cancelOpen = cancelWaitMs <= 0;
+
+  const expiresMs = order.expires_at
+    ? new Date(order.expires_at).getTime() - now
+    : null;
+
+  // A code makes the order final, so cancel only exists while waiting.
+  const canCancel = waiting && Boolean(order.phone_number);
+
+  return (
+    <>
+      <PageHead
+        title="Your number"
+        sub={`${order.service_name} · ${order.country_name}`}
+        back="/pay"
+      />
+
+      {backButton}
+
+      {/* ---------------- Number ---------------- */}
+      <section className="card stack-sm">
+        <div
+          className="row between"
+          style={{ alignItems: "center", gap: 12 }}
+        >
+          <span className="muted small">Phone number</span>
+          <StatusBadge status={badgeStatus(order)} />
+        </div>
+
+        <strong
+          className="num"
+          style={{
+            fontSize: "var(--t-xl, 28px)",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {order.phone_number ?? "Awaiting number"}
+        </strong>
+
+        {order.phone_number && (waiting || received) && (
+          <Button
+            variant="secondary"
+            onClick={() =>
+              onCopy(order.phone_number ?? "", "Number copied")
+            }
+          >
+            Copy number
+          </Button>
+        )}
+      </section>
+
+      {/* ---------------- Code received: final ---------------- */}
       {received && (
-        <div className="stack-sm">
-          {order.sms_code ? (
-            <div
-              className="row between"
-              style={{
-                alignItems: "center",
-                gap: 12,
-                padding: "12px 14px",
-                border: `1px solid ${palette.accent}`,
-                borderRadius: palette.radius,
-                background: palette.surface,
-              }}
-            >
-              <span style={{ minWidth: 0 }}>
-                <span className="muted xs" style={{ display: "block" }}>
-                  Verification code
-                </span>
+        <section
+          className="card stack-sm"
+          style={{ border: `1px solid ${palette.accent}` }}
+        >
+          <h2 className="section-title" style={{ margin: 0 }}>
+            Verification code
+          </h2>
 
-                <strong
-                  className="num"
-                  style={{
-                    display: "block",
-                    fontSize: "var(--t-xl, 28px)",
-                    letterSpacing: 2,
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {order.sms_code}
-                </strong>
-              </span>
+          {order.sms_code ? (
+            <>
+              <strong
+                className="num"
+                style={{
+                  fontSize: "var(--t-xl, 32px)",
+                  letterSpacing: 3,
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {order.sms_code}
+              </strong>
 
               <Button
-                sm
                 variant="secondary"
                 onClick={() =>
                   onCopy(order.sms_code ?? "", "Code copied")
@@ -535,125 +668,156 @@ function OrderCard({
               >
                 Copy code
               </Button>
-            </div>
+            </>
           ) : (
             <div className="banner info">Code received.</div>
           )}
 
-          <span className="muted small">
+          <p className="muted small" style={{ margin: 0 }}>
             Your code was delivered, so this order is final and cannot
             be cancelled or refunded.
-          </span>
-        </div>
+          </p>
+        </section>
       )}
 
-      {/* ---- Waiting for the code ---- */}
+      {/* ---------------- Waiting for the code ---------------- */}
       {waiting && (
-        <div className="stack-sm">
+        <section className="card stack-sm">
+          <h2 className="section-title" style={{ margin: 0 }}>
+            Waiting for the code
+          </h2>
+
           <div className="banner info">
-            Waiting for the code… Use this number on {order.service_name}
-            . The code will appear here on its own.
+            Use this number on {order.service_name} now. The code will
+            appear here by itself.
           </div>
 
-          <div
-            className="row between"
-            style={{ alignItems: "center", gap: 12 }}
-          >
-            {order.expires_at ? (
-              <Countdown expiresAt={order.expires_at} />
-            ) : (
-              <span />
-            )}
-
-            <Button
-              sm
-              variant="secondary"
-              loading={checking}
-              disabled={checking}
-              onClick={onCheck}
-            >
-              Check now
-            </Button>
-          </div>
+          {expiresMs !== null && !Number.isNaN(expiresMs) && (
+            <span className="muted small">
+              {expiresMs > 0 ? (
+                <>
+                  Number expires in{" "}
+                  <strong className="num">{formatClock(expiresMs)}</strong>
+                </>
+              ) : (
+                "Time is up. Updating…"
+              )}
+            </span>
+          )}
 
           <span className="muted small">
             Your money is on hold. You are charged only if a code
-            arrives. If it does not, the hold is released.
+            arrives.
           </span>
-        </div>
+
+          <Button
+            variant="secondary"
+            loading={refreshing}
+            disabled={refreshing}
+            onClick={onRefresh}
+          >
+            Check now
+          </Button>
+        </section>
       )}
 
       {confirming && (
-        <span className="muted small">
-          We are confirming this order with the provider. Please do not
-          buy again yet.
-        </span>
+        <section className="card stack-sm">
+          <h2 className="section-title" style={{ margin: 0 }}>
+            Confirming your order
+          </h2>
+
+          <p className="muted small" style={{ margin: 0 }}>
+            We are confirming this order with the provider. Please do
+            not buy again yet. This page updates by itself.
+          </p>
+        </section>
       )}
 
-      {order.failure_reason && (
-        <span className="small">{order.failure_reason}</span>
+      {(status === "FAILED" ||
+        status === "EXPIRED" ||
+        status === "CANCELLED") && (
+        <section className="card stack-sm">
+          <h2 className="section-title" style={{ margin: 0 }}>
+            {status === "FAILED"
+              ? "Order failed"
+              : status === "EXPIRED"
+                ? "No code arrived"
+                : "Order cancelled"}
+          </h2>
+
+          {order.failure_reason && (
+            <p className="small" style={{ margin: 0 }}>
+              {order.failure_reason}
+            </p>
+          )}
+
+          <p className="muted small" style={{ margin: 0 }}>
+            {refunded
+              ? "Your money has been returned to your wallet."
+              : "Your held money is released once the provider confirms."}
+          </p>
+        </section>
       )}
 
-      {status === "FAILED" && (
-        <span className="muted small">
-          {refunded
-            ? "This order failed and your money has been returned."
-            : "This order failed. Any held money is released once the provider confirms."}
-        </span>
-      )}
+      {/* ---------------- Cancel (after 2 minutes, no code) ---------------- */}
+      {canCancel && (
+        <section className="card stack-sm">
+          <h2 className="section-title" style={{ margin: 0 }}>
+            Not getting a code?
+          </h2>
 
-      {status === "EXPIRED" && (
-        <span className="muted small">
-          {refunded
-            ? "No code arrived in time and your money has been returned."
-            : "No code arrived in time. Your held money is released once the provider confirms."}
-        </span>
-      )}
+          <p className="muted small" style={{ margin: 0 }}>
+            {cancelOpen
+              ? "No code has arrived. You can cancel and get your money back."
+              : "You can cancel after 2 minutes if no code arrives."}
+          </p>
 
-      {status === "CANCELLED" && (
-        <span className="muted small">
-          {refunded
-            ? "Cancelled and your money has been returned."
-            : "Cancelled. Your held money is released once the provider confirms."}
-        </span>
-      )}
-
-      {(canCopyNumber || canCancel) && (
-        <div className="row wrap" style={{ gap: 8 }}>
-          {canCopyNumber && (
-            <Button
-              sm
-              variant="secondary"
-              onClick={() =>
-                onCopy(order.phone_number ?? "", "Number copied")
+          <Button
+            block
+            variant="danger"
+            loading={cancelling}
+            disabled={!cancelOpen || cancelling}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Cancel this number? Your money is returned if no code has arrived yet.",
+                )
+              ) {
+                onCancel();
               }
-            >
-              Copy number
-            </Button>
-          )}
-
-          {canCancel && (
-            <Button
-              sm
-              variant="danger"
-              loading={cancelling}
-              disabled={cancelling}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Cancel this number? Your money is returned if no code has arrived yet.",
-                  )
-                ) {
-                  onCancel();
-                }
-              }}
-            >
-              Cancel
-            </Button>
-          )}
-        </div>
+            }}
+          >
+            {cancelOpen
+              ? "Cancel number"
+              : `Cancel in ${formatClock(cancelWaitMs)}`}
+          </Button>
+        </section>
       )}
-    </article>
+
+      {/* ---------------- Details ---------------- */}
+      <section className="card stack-sm">
+        <div className="row between">
+          <span className="muted">Price</span>
+          <strong className="num">{formatKobo(order.price_kobo)}</strong>
+        </div>
+
+        <div className="row between">
+          <span className="muted">Reference</span>
+          <strong
+            className="num"
+            style={{ overflowWrap: "anywhere", textAlign: "right" }}
+          >
+            {order.reference}
+          </strong>
+        </div>
+
+        <div className="row between">
+          <span className="muted">Date</span>
+          <span>{new Date(order.created_at).toLocaleString()}</span>
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -669,6 +833,10 @@ export default function VirtualNumbers() {
   const [editingCountry, setEditingCountry] = useState(false);
   const [editingService, setEditingService] = useState(false);
   const [review, setReview] = useState(false);
+  // The number currently open on the in-page number screen.
+  const [viewingId, setViewingId] = useState<string | null>(null);
+  // Order created by the purchase in flight; opened when the sheet closes.
+  const purchasedOrderId = useRef<string | null>(null);
 
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -860,21 +1028,25 @@ export default function VirtualNumbers() {
 
     onSuccess: () => {
       toast("Cancellation request submitted");
-
-      void queryClient.invalidateQueries({
-        queryKey: ["vnumber-orders"],
-      });
     },
 
     onError: (error) => {
+      // The server may refuse because a code just arrived, or because
+      // two minutes have not passed on its clock.
       toast(friendly(error));
+    },
 
-      // The server may have refused because a code just arrived.
+    onSettled: () => {
       void queryClient.invalidateQueries({
         queryKey: ["vnumber-orders"],
       });
     },
   });
+
+  const viewingOrder =
+    viewingId !== null
+      ? orders.data?.find((item) => item.id === viewingId)
+      : undefined;
 
   const globalError =
     countries.error ?? services.error ?? orders.error;
@@ -886,292 +1058,358 @@ export default function VirtualNumbers() {
 
   return (
     <div className="stack">
-      <PageHead
-        title="Virtual Numbers"
-        sub="Get a temporary number to receive a verification code."
-        back="/pay"
-      />
-
-      {globalError && (
-        <Banner tone="error">{friendly(globalError)}</Banner>
-      )}
-
-      {/* ---------------- Step 1: country ---------------- */}
-      <section className="card stack-sm">
-        <StepHeader
-          step={1}
-          title="Choose a country"
-          done={!countryStepOpen}
+      {viewingId !== null ? (
+        <NumberView
+          order={viewingOrder}
+          loading={orders.isPending}
+          refreshing={orders.isFetching}
+          cancelling={
+            cancelMutation.isPending &&
+            cancelMutation.variables === viewingId
+          }
+          onBack={() => setViewingId(null)}
+          onRefresh={() => void orders.refetch()}
+          onCancel={() => cancelMutation.mutate(viewingId)}
+          onCopy={copyText}
         />
-
-        {countries.isPending && (
-          <div className="stack-sm">
-            <Skeleton h={44} />
-            <Skeleton h={ROW_HEIGHT * 3} />
-          </div>
-        )}
-
-        {countries.isError && (
-          <div className="stack-sm">
-            <p className="muted small">
-              Countries could not be loaded.
-            </p>
-
-            <Button
-              variant="secondary"
-              onClick={() => void countries.refetch()}
-            >
-              Try again
-            </Button>
-          </div>
-        )}
-
-        {countries.data && !countryStepOpen && selectedCountry && (
-          <SummaryRow
-            label="Country"
-            value={selectedCountry.name}
-            onChange={() => setEditingCountry(true)}
+      ) : (
+        <>
+          <PageHead
+            title="Virtual Numbers"
+            sub="Get a temporary number to receive a verification code."
+            back="/pay"
           />
-        )}
 
-        {countries.data && countryStepOpen && (
-          <>
-            <SearchBox
-              label="Search countries"
-              placeholder="Search countries"
-              value={countrySearch}
-              onChange={setCountrySearch}
+          {globalError && (
+            <Banner tone="error">{friendly(globalError)}</Banner>
+          )}
+
+          {/* ---------------- Step 1: country ---------------- */}
+          <section className="card stack-sm">
+            <StepHeader
+              step={1}
+              title="Choose a country"
+              done={!countryStepOpen}
             />
 
-            {filteredCountries.length === 0 ? (
-              <Empty title="No matching country">
-                Check the spelling or try another name.
-              </Empty>
-            ) : (
-              <>
-                <div
-                  style={pickerBox}
-                  role="group"
-                  aria-label="Countries"
-                >
-                  {filteredCountries.map((item) => (
-                    <PickerRow
-                      key={item.id}
-                      title={item.name}
-                      selected={item.id === countryId}
-                      onClick={() => chooseCountry(item.id)}
-                    />
-                  ))}
-                </div>
+            {countries.isPending && (
+              <div className="stack-sm">
+                <Skeleton h={44} />
+                <Skeleton h={ROW_HEIGHT * 3} />
+              </div>
+            )}
 
-                <ScrollHint count={filteredCountries.length} />
+            {countries.isError && (
+              <div className="stack-sm">
+                <p className="muted small">
+                  Countries could not be loaded.
+                </p>
+
+                <Button
+                  variant="secondary"
+                  onClick={() => void countries.refetch()}
+                >
+                  Try again
+                </Button>
+              </div>
+            )}
+
+            {countries.data && !countryStepOpen && selectedCountry && (
+              <SummaryRow
+                label="Country"
+                value={selectedCountry.name}
+                onChange={() => setEditingCountry(true)}
+              />
+            )}
+
+            {countries.data && countryStepOpen && (
+              <>
+                <SearchBox
+                  label="Search countries"
+                  placeholder="Search countries"
+                  value={countrySearch}
+                  onChange={setCountrySearch}
+                />
+
+                {filteredCountries.length === 0 ? (
+                  <Empty title="No matching country">
+                    Check the spelling or try another name.
+                  </Empty>
+                ) : (
+                  <>
+                    <div
+                      style={pickerBox}
+                      role="group"
+                      aria-label="Countries"
+                    >
+                      {filteredCountries.map((item) => (
+                        <PickerRow
+                          key={item.id}
+                          title={item.name}
+                          selected={item.id === countryId}
+                          onClick={() => chooseCountry(item.id)}
+                        />
+                      ))}
+                    </div>
+
+                    <ScrollHint count={filteredCountries.length} />
+                  </>
+                )}
               </>
             )}
-          </>
-        )}
-      </section>
+          </section>
 
-      {/* ---------------- Step 2: service ---------------- */}
-      {countryId !== null && !countryStepOpen && (
-        <section className="card stack-sm">
-          <StepHeader
-            step={2}
-            title="Choose a service"
-            done={!serviceStepOpen && Boolean(selectedPrice)}
-          />
-
-          {services.isPending && (
-            <div className="stack-sm">
-              <Skeleton h={44} />
-              <Skeleton h={ROW_HEIGHT * 3} />
-            </div>
-          )}
-
-          {services.isError && (
-            <div className="stack-sm">
-              <p className="muted small">
-                The service list could not be loaded.
-              </p>
-
-              <Button
-                variant="secondary"
-                onClick={() => void services.refetch()}
-              >
-                Try again
-              </Button>
-            </div>
-          )}
-
-          {prices.isPending && (
-            <div className="stack-sm">
-              <p className="muted small">
-                Getting live prices for{" "}
-                {selectedCountry?.name ?? "this country"}. The first
-                load can take up to a minute.
-              </p>
-              <Skeleton h={ROW_HEIGHT} />
-              <Skeleton h={ROW_HEIGHT} />
-              <Skeleton h={ROW_HEIGHT} />
-            </div>
-          )}
-
-          {prices.isError && (
-            <div className="stack-sm">
-              <Banner tone="error">{friendly(prices.error)}</Banner>
-
-              <Button
-                variant="secondary"
-                onClick={() => void prices.refetch()}
-              >
-                Retry prices
-              </Button>
-            </div>
-          )}
-
-          {services.data && prices.data && !serviceStepOpen &&
-            selectedService && (
-              <SummaryRow
-                label="Service"
-                value={selectedService.name}
-                onChange={() => setEditingService(true)}
-              />
-            )}
-
-          {services.data && prices.data && serviceStepOpen && (
-            <>
-              <SearchBox
-                label="Search services"
-                placeholder={`Search ${pricedServices.length.toLocaleString()} services (e.g. WhatsApp)`}
-                value={serviceSearch}
-                onChange={setServiceSearch}
+          {/* ---------------- Step 2: service ---------------- */}
+          {countryId !== null && !countryStepOpen && (
+            <section className="card stack-sm">
+              <StepHeader
+                step={2}
+                title="Choose a service"
+                done={!serviceStepOpen && Boolean(selectedPrice)}
               />
 
-              <p className="muted xs" style={{ margin: 0 }}>
-                {searching
-                  ? "Showing matching services with a price for this country."
-                  : "Popular services. Type at least two letters to search them all."}
-              </p>
+              {services.isPending && (
+                <div className="stack-sm">
+                  <Skeleton h={44} />
+                  <Skeleton h={ROW_HEIGHT * 3} />
+                </div>
+              )}
 
-              {visibleServices.length === 0 ? (
-                <Empty
-                  title={
-                    searching
-                      ? "No matching service"
-                      : "Search for a service"
-                  }
-                >
-                  {searching
-                    ? "Try another name. Only services available in this country are listed."
-                    : "Type a service name above to see its price."}
-                </Empty>
-              ) : (
-                <>
-                  <div
-                    style={pickerBox}
-                    role="group"
-                    aria-label="Services"
+              {services.isError && (
+                <div className="stack-sm">
+                  <p className="muted small">
+                    The service list could not be loaded.
+                  </p>
+
+                  <Button
+                    variant="secondary"
+                    onClick={() => void services.refetch()}
                   >
-                    {visibleServices.map(({ service, price }) => (
-                      <PickerRow
-                        key={service.id}
-                        title={service.name}
-                        subtitle={stockLabel(price)}
-                        right={
-                          price.available === false
-                            ? undefined
-                            : formatKobo(price.price_kobo)
-                        }
-                        selected={service.id === serviceId}
-                        disabled={!isPurchasable(price)}
-                        onClick={() => chooseService(service.id)}
-                      />
-                    ))}
-                  </div>
+                    Try again
+                  </Button>
+                </div>
+              )}
 
-                  <ScrollHint count={visibleServices.length} />
+              {prices.isPending && (
+                <div className="stack-sm">
+                  <p className="muted small">
+                    Getting live prices for{" "}
+                    {selectedCountry?.name ?? "this country"}. The first
+                    load can take up to a minute.
+                  </p>
+                  <Skeleton h={ROW_HEIGHT} />
+                  <Skeleton h={ROW_HEIGHT} />
+                  <Skeleton h={ROW_HEIGHT} />
+                </div>
+              )}
+
+              {prices.isError && (
+                <div className="stack-sm">
+                  <Banner tone="error">{friendly(prices.error)}</Banner>
+
+                  <Button
+                    variant="secondary"
+                    onClick={() => void prices.refetch()}
+                  >
+                    Retry prices
+                  </Button>
+                </div>
+              )}
+
+              {services.data && prices.data && !serviceStepOpen &&
+                selectedService && (
+                  <SummaryRow
+                    label="Service"
+                    value={selectedService.name}
+                    onChange={() => setEditingService(true)}
+                  />
+                )}
+
+              {services.data && prices.data && serviceStepOpen && (
+                <>
+                  <SearchBox
+                    label="Search services"
+                    placeholder={`Search ${pricedServices.length.toLocaleString()} services (e.g. WhatsApp)`}
+                    value={serviceSearch}
+                    onChange={setServiceSearch}
+                  />
+
+                  <p className="muted xs" style={{ margin: 0 }}>
+                    {searching
+                      ? "Showing matching services with a price for this country."
+                      : "Popular services. Type at least two letters to search them all."}
+                  </p>
+
+                  {visibleServices.length === 0 ? (
+                    <Empty
+                      title={
+                        searching
+                          ? "No matching service"
+                          : "Search for a service"
+                      }
+                    >
+                      {searching
+                        ? "Try another name. Only services available in this country are listed."
+                        : "Type a service name above to see its price."}
+                    </Empty>
+                  ) : (
+                    <>
+                      <div
+                        style={pickerBox}
+                        role="group"
+                        aria-label="Services"
+                      >
+                        {visibleServices.map(({ service, price }) => (
+                          <PickerRow
+                            key={service.id}
+                            title={service.name}
+                            subtitle={stockLabel(price)}
+                            right={
+                              price.available === false
+                                ? undefined
+                                : formatKobo(price.price_kobo)
+                            }
+                            selected={service.id === serviceId}
+                            disabled={!isPurchasable(price)}
+                            onClick={() => chooseService(service.id)}
+                          />
+                        ))}
+                      </div>
+
+                      <ScrollHint count={visibleServices.length} />
+                    </>
+                  )}
                 </>
               )}
-            </>
+            </section>
           )}
-        </section>
-      )}
 
-      {/* ---------------- Step 3: review ---------------- */}
-      {selectedPrice && !serviceStepOpen && !countryStepOpen && (
-        <section
-          className="card stack-sm"
-          style={{ border: `1px solid ${palette.accent}` }}
-        >
-          <StepHeader step={3} title="Your order" />
-
-          <div className="stack-sm">
-            <div className="row between">
-              <span className="muted">Country</span>
-              <strong>{selectedPrice.country_name}</strong>
-            </div>
-
-            <div className="row between">
-              <span className="muted">Service</span>
-              <strong>{selectedPrice.service_name}</strong>
-            </div>
-
-            <div className="row between">
-              <span className="muted">Availability</span>
-              <strong>{stockLabel(selectedPrice)}</strong>
-            </div>
-          </div>
-
-          <div
-            className="row between"
-            style={{
-              alignItems: "center",
-              paddingTop: 12,
-              borderTop: palette.border,
-            }}
-          >
-            <span className="muted">Total</span>
-
-            <strong
-              className="num"
-              style={{ fontSize: "var(--t-xl, 24px)" }}
+          {/* ---------------- Step 3: review ---------------- */}
+          {selectedPrice && !serviceStepOpen && !countryStepOpen && (
+            <section
+              className="card stack-sm"
+              style={{ border: `1px solid ${palette.accent}` }}
             >
-              {formatKobo(selectedPrice.price_kobo)}
-            </strong>
-          </div>
+              <StepHeader step={3} title="Your order" />
 
-          <ul
-            className="muted small"
-            style={{ margin: 0, paddingLeft: 18 }}
-          >
-            <li>
-              Your money is held while we get your number. You are
-              charged only if a code arrives.
-            </li>
-            <li>
-              The code appears on this page by itself. Once it shows,
-              the order is final and cannot be refunded.
-            </li>
-            <li>
-              If no code arrives before the number expires, or the
-              purchase fails, the hold is released.
-            </li>
-            <li>Buying can take up to a minute. Keep this page open.</li>
-          </ul>
+              <div className="stack-sm">
+                <div className="row between">
+                  <span className="muted">Country</span>
+                  <strong>{selectedPrice.country_name}</strong>
+                </div>
 
-          <Button
-            block
-            disabled={!isPurchasable(selectedPrice)}
-            onClick={() => setReview(true)}
-          >
-            Continue to payment
-          </Button>
-        </section>
+                <div className="row between">
+                  <span className="muted">Service</span>
+                  <strong>{selectedPrice.service_name}</strong>
+                </div>
+
+                <div className="row between">
+                  <span className="muted">Availability</span>
+                  <strong>{stockLabel(selectedPrice)}</strong>
+                </div>
+              </div>
+
+              <div
+                className="row between"
+                style={{
+                  alignItems: "center",
+                  paddingTop: 12,
+                  borderTop: palette.border,
+                }}
+              >
+                <span className="muted">Total</span>
+
+                <strong
+                  className="num"
+                  style={{ fontSize: "var(--t-xl, 24px)" }}
+                >
+                  {formatKobo(selectedPrice.price_kobo)}
+                </strong>
+              </div>
+
+              <ul
+                className="muted small"
+                style={{ margin: 0, paddingLeft: 18 }}
+              >
+                <li>
+                  Your money is held while we get your number. You are
+                  charged only if a code arrives.
+                </li>
+                <li>
+                  Your number opens on its own page, and the code appears
+                  there by itself. Once it shows, the order is final and
+                  cannot be refunded.
+                </li>
+                <li>
+                  No code? You can cancel after 2 minutes. If the number
+                  expires or the purchase fails, the hold is released.
+                </li>
+                <li>Buying can take up to a minute. Keep this page open.</li>
+              </ul>
+
+              <Button
+                block
+                disabled={!isPurchasable(selectedPrice)}
+                onClick={() => setReview(true)}
+              >
+                Continue to payment
+              </Button>
+            </section>
+          )}
+
+
+          {/* ---------------- My numbers ---------------- */}
+          <section className="stack-sm">
+            <h2 className="section-title">My numbers</h2>
+
+            {orders.isPending ? (
+              <div className="stack">
+                <Skeleton h={96} />
+                <Skeleton h={96} />
+              </div>
+            ) : orders.isError ? (
+              <div className="stack-sm">
+                <p className="muted small">
+                  Your orders could not be loaded.
+                </p>
+
+                <Button
+                  variant="secondary"
+                  onClick={() => void orders.refetch()}
+                >
+                  Try again
+                </Button>
+              </div>
+            ) : !orders.data?.length ? (
+              <Empty title="No numbers yet">
+                Numbers you buy will appear here.
+              </Empty>
+            ) : (
+              <div className="stack-sm">
+                {orders.data.map((order) => (
+                  <OrderRow
+                    key={order.id}
+                    order={order}
+                    onOpen={() => setViewingId(order.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        </>
       )}
 
       {selectedPrice && (
         <ReviewSheet
           open={review}
-          onClose={() => setReview(false)}
+          onClose={() => {
+            setReview(false);
+
+            if (purchasedOrderId.current) {
+              setViewingId(purchasedOrderId.current);
+              purchasedOrderId.current = null;
+            }
+          }}
           title="Review virtual number"
           lines={[
             ["Country", selectedPrice.country_name],
@@ -1180,14 +1418,14 @@ export default function VirtualNumbers() {
             ["Charged", "Only if a code arrives"],
           ]}
           total={formatKobo(selectedPrice.price_kobo)}
-          note="The price is checked with the provider before your money is held. The hold is released if no code arrives. Once a code is delivered, the order is final and cannot be refunded. If the result is uncertain, the order stays under confirmation and must not be retried."
+          note="The price is checked with the provider before your money is held. The hold is released if no code arrives. You can cancel after 2 minutes if no code arrives. Once a code is delivered, the order is final and cannot be refunded. If the result is uncertain, the order stays under confirmation and must not be retried."
           onPriceChanged={(message) => {
             toast(message);
             void prices.refetch();
           }}
           submit={async ({ pinToken, idempotencyKey }) => {
             try {
-              return await api.post<Txn>(
+              const result = await api.post<PurchaseResult>(
                 "/api/v1/virtual-numbers/orders",
                 {
                   country_id: selectedPrice.country_id,
@@ -1202,6 +1440,11 @@ export default function VirtualNumbers() {
                   timeoutMs: SLOW_REQUEST_TIMEOUT_MS,
                 },
               );
+
+              // Remember the new order. It opens when the sheet closes.
+              purchasedOrderId.current = result.order_id ?? null;
+
+              return result;
             } finally {
               // Whatever the outcome (success, failure, or "being
               // confirmed"), the order list must reflect it. This also
@@ -1213,52 +1456,6 @@ export default function VirtualNumbers() {
           }}
         />
       )}
-
-      {/* ---------------- My numbers ---------------- */}
-      <section className="stack-sm">
-        <h2 className="section-title">My numbers</h2>
-
-        {orders.isPending ? (
-          <div className="stack">
-            <Skeleton h={96} />
-            <Skeleton h={96} />
-          </div>
-        ) : orders.isError ? (
-          <div className="stack-sm">
-            <p className="muted small">
-              Your orders could not be loaded.
-            </p>
-
-            <Button
-              variant="secondary"
-              onClick={() => void orders.refetch()}
-            >
-              Try again
-            </Button>
-          </div>
-        ) : !orders.data?.length ? (
-          <Empty title="No numbers yet">
-            Numbers you buy will appear here.
-          </Empty>
-        ) : (
-          <div className="stack-sm">
-            {orders.data.map((order) => (
-              <OrderCard
-                key={order.id}
-                order={order}
-                checking={orders.isFetching}
-                cancelling={
-                  cancelMutation.isPending &&
-                  cancelMutation.variables === order.id
-                }
-                onCheck={() => void orders.refetch()}
-                onCancel={() => cancelMutation.mutate(order.id)}
-                onCopy={copyText}
-              />
-            ))}
-          </div>
-        )}
-      </section>
     </div>
   );
 }
