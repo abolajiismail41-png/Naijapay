@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   useMutation,
@@ -49,6 +49,16 @@ type Price = {
   currency: string;
 };
 
+/**
+ * Order lifecycle (the backend owns every transition):
+ *
+ *   PENDING / UNKNOWN  purchase in flight or being confirmed with provider
+ *   ACTIVE             number assigned, money held, waiting for the code
+ *   SMS_RECEIVED       code arrived, money captured, order is final
+ *   EXPIRED            no code before expiry, hold released
+ *   CANCELLED          cancelled before any code, hold released
+ *   FAILED             purchase failed, hold released
+ */
 type Order = {
   id: string;
   reference: string;
@@ -63,12 +73,8 @@ type Order = {
   refund_status?: string | null;
   failure_reason?: string | null;
   created_at: string;
-};
-
-type SmsResult = {
-  order_id: string;
-  status: string;
-  sms_code?: string | null;
+  /** ISO time after which the number stops waiting for a code. */
+  expires_at?: string | null;
 };
 
 type PricedService = {
@@ -88,6 +94,10 @@ const MAX_POPULAR_RESULTS = 12;
 const ROW_HEIGHT = 56;
 const VISIBLE_ROWS = 6;
 
+// How often the orders list refreshes while something is in flight.
+const WAITING_POLL_MS = 5_000;
+const CONFIRMING_POLL_MS = 10_000;
+
 // Services shown first, before the customer types anything.
 const POPULAR_SERVICES = [
   "whatsapp",
@@ -104,8 +114,8 @@ const POPULAR_SERVICES = [
   "tinder",
 ];
 
-// Calls that wait on the SMS-Man API (price lookups, purchase, SMS check,
-// cancel) can take far longer than the client's 20s default, so they use the
+// Calls that wait on the SMS-Man API (price lookups, purchase, cancel) can
+// take far longer than the client's 20s default, so they use the
 // slow-request timeout. Everything else keeps the default.
 const SLOW = { timeoutMs: SLOW_REQUEST_TIMEOUT_MS };
 
@@ -164,6 +174,34 @@ function isPopular(name: string): boolean {
   const value = name.toLowerCase();
 
   return POPULAR_SERVICES.some((item) => value.includes(item));
+}
+
+// A code has arrived. From this point the order is final: no cancel, no
+// refund. The backend enforces the same rule; this only drives the UI.
+function hasCode(order: Order): boolean {
+  return (
+    Boolean(order.sms_code) ||
+    normaliseStatus(order.status) === "SMS_RECEIVED"
+  );
+}
+
+// Number assigned, money held, still waiting for the code.
+function isWaiting(order: Order): boolean {
+  return normaliseStatus(order.status) === "ACTIVE" && !hasCode(order);
+}
+
+// Purchase still in flight or being confirmed with the provider.
+function isConfirming(order: Order): boolean {
+  const status = normaliseStatus(order.status);
+
+  return status === "UNKNOWN" || status === "PENDING";
+}
+
+function badgeStatus(order: Order): string {
+  if (hasCode(order)) return "SUCCESSFUL";
+  if (isWaiting(order) || isConfirming(order)) return "PENDING";
+
+  return normaliseStatus(order.status);
 }
 
 /* ------------------------------------------------------------------ */
@@ -371,6 +409,254 @@ function SummaryRow({
   );
 }
 
+// Ticks once a second, only while mounted (i.e. while an order is waiting).
+function Countdown({ expiresAt }: { expiresAt: string }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+
+    return () => window.clearInterval(id);
+  }, []);
+
+  const end = new Date(expiresAt).getTime();
+
+  if (Number.isNaN(end)) return null;
+
+  const seconds = Math.max(0, Math.floor((end - now) / 1000));
+
+  if (seconds === 0) {
+    return <span className="muted small">Time is up. Updating…</span>;
+  }
+
+  const mm = Math.floor(seconds / 60);
+  const ss = String(seconds % 60).padStart(2, "0");
+
+  return (
+    <span className="muted small">
+      Time left: <strong className="num">{`${mm}:${ss}`}</strong>
+    </span>
+  );
+}
+
+function OrderCard({
+  order,
+  checking,
+  cancelling,
+  onCheck,
+  onCancel,
+  onCopy,
+}: {
+  order: Order;
+  checking: boolean;
+  cancelling: boolean;
+  onCheck: () => void;
+  onCancel: () => void;
+  onCopy: (value: string, message: string) => void;
+}) {
+  const status = normaliseStatus(order.status);
+  const received = hasCode(order);
+  const waiting = isWaiting(order);
+  const confirming = isConfirming(order);
+  const refunded = order.refund_status === "REFUNDED";
+
+  // A code makes the order final, so cancel only exists while waiting.
+  const canCancel = Boolean(order.phone_number) && waiting;
+  const canCopyNumber =
+    Boolean(order.phone_number) && (waiting || received);
+
+  return (
+    <article className="card stack-sm">
+      <div
+        className="row between"
+        style={{ alignItems: "center", gap: 12 }}
+      >
+        <strong
+          className="num"
+          style={{ fontSize: "var(--t-lg, 18px)" }}
+        >
+          {order.phone_number ?? "Awaiting number"}
+        </strong>
+
+        <StatusBadge status={badgeStatus(order)} />
+      </div>
+
+      <span className="muted small">
+        {order.service_name} · {order.country_name}
+      </span>
+
+      <div className="row between">
+        <span className="muted xs">
+          {new Date(order.created_at).toLocaleString()}
+        </span>
+
+        <strong className="num">{formatKobo(order.price_kobo)}</strong>
+      </div>
+
+      {/* ---- Code received: final ---- */}
+      {received && (
+        <div className="stack-sm">
+          {order.sms_code ? (
+            <div
+              className="row between"
+              style={{
+                alignItems: "center",
+                gap: 12,
+                padding: "12px 14px",
+                border: `1px solid ${palette.accent}`,
+                borderRadius: palette.radius,
+                background: palette.surface,
+              }}
+            >
+              <span style={{ minWidth: 0 }}>
+                <span className="muted xs" style={{ display: "block" }}>
+                  Verification code
+                </span>
+
+                <strong
+                  className="num"
+                  style={{
+                    display: "block",
+                    fontSize: "var(--t-xl, 28px)",
+                    letterSpacing: 2,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {order.sms_code}
+                </strong>
+              </span>
+
+              <Button
+                sm
+                variant="secondary"
+                onClick={() =>
+                  onCopy(order.sms_code ?? "", "Code copied")
+                }
+              >
+                Copy code
+              </Button>
+            </div>
+          ) : (
+            <div className="banner info">Code received.</div>
+          )}
+
+          <span className="muted small">
+            Your code was delivered, so this order is final and cannot
+            be cancelled or refunded.
+          </span>
+        </div>
+      )}
+
+      {/* ---- Waiting for the code ---- */}
+      {waiting && (
+        <div className="stack-sm">
+          <div className="banner info">
+            Waiting for the code… Use this number on {order.service_name}
+            . The code will appear here on its own.
+          </div>
+
+          <div
+            className="row between"
+            style={{ alignItems: "center", gap: 12 }}
+          >
+            {order.expires_at ? (
+              <Countdown expiresAt={order.expires_at} />
+            ) : (
+              <span />
+            )}
+
+            <Button
+              sm
+              variant="secondary"
+              loading={checking}
+              disabled={checking}
+              onClick={onCheck}
+            >
+              Check now
+            </Button>
+          </div>
+
+          <span className="muted small">
+            Your money is on hold. You are charged only if a code
+            arrives. If it does not, the hold is released.
+          </span>
+        </div>
+      )}
+
+      {confirming && (
+        <span className="muted small">
+          We are confirming this order with the provider. Please do not
+          buy again yet.
+        </span>
+      )}
+
+      {order.failure_reason && (
+        <span className="small">{order.failure_reason}</span>
+      )}
+
+      {status === "FAILED" && (
+        <span className="muted small">
+          {refunded
+            ? "This order failed and your money has been returned."
+            : "This order failed. Any held money is released once the provider confirms."}
+        </span>
+      )}
+
+      {status === "EXPIRED" && (
+        <span className="muted small">
+          {refunded
+            ? "No code arrived in time and your money has been returned."
+            : "No code arrived in time. Your held money is released once the provider confirms."}
+        </span>
+      )}
+
+      {status === "CANCELLED" && (
+        <span className="muted small">
+          {refunded
+            ? "Cancelled and your money has been returned."
+            : "Cancelled. Your held money is released once the provider confirms."}
+        </span>
+      )}
+
+      {(canCopyNumber || canCancel) && (
+        <div className="row wrap" style={{ gap: 8 }}>
+          {canCopyNumber && (
+            <Button
+              sm
+              variant="secondary"
+              onClick={() =>
+                onCopy(order.phone_number ?? "", "Number copied")
+              }
+            >
+              Copy number
+            </Button>
+          )}
+
+          {canCancel && (
+            <Button
+              sm
+              variant="danger"
+              loading={cancelling}
+              disabled={cancelling}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Cancel this number? Your money is returned if no code has arrived yet.",
+                  )
+                ) {
+                  onCancel();
+                }
+              }}
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
@@ -383,7 +669,6 @@ export default function VirtualNumbers() {
   const [editingCountry, setEditingCountry] = useState(false);
   const [editingService, setEditingService] = useState(false);
   const [review, setReview] = useState(false);
-  const [smsCode, setSmsCode] = useState<string | null>(null);
 
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -414,11 +699,25 @@ export default function VirtualNumbers() {
     retry: false,
   });
 
+  // Polls while any number is waiting for a code (or being confirmed), so
+  // the code shows up without the customer tapping anything. Polling
+  // stops by itself once nothing is in flight. The backend must refresh
+  // the provider state on this endpoint, or a worker/webhook must write
+  // the code to the order.
   const orders = useQuery({
     queryKey: ["vnumber-orders"],
     queryFn: () =>
       api.get<Order[]>("/api/v1/virtual-numbers/orders"),
     retry: false,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+
+      if (!data) return false;
+      if (data.some(isWaiting)) return WAITING_POLL_MS;
+      if (data.some(isConfirming)) return CONFIRMING_POLL_MS;
+
+      return false;
+    },
   });
 
   /* ------------------------- derived data -------------------------- */
@@ -500,6 +799,32 @@ export default function VirtualNumbers() {
       ? services.data?.find((item) => item.id === serviceId)
       : undefined;
 
+  /* ---------------------------- effects ---------------------------- */
+
+  // Tell the customer when a code arrives. Codes already present on the
+  // first load are not announced.
+  const seenCodes = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    const data = orders.data;
+
+    if (!data) return;
+
+    const coded = data.filter((order) => Boolean(order.sms_code));
+
+    if (seenCodes.current === null) {
+      seenCodes.current = new Set(coded.map((order) => order.id));
+      return;
+    }
+
+    for (const order of coded) {
+      if (!seenCodes.current.has(order.id)) {
+        seenCodes.current.add(order.id);
+        toast("Code received");
+      }
+    }
+  }, [orders.data, toast]);
+
   /* ---------------------------- actions ---------------------------- */
 
   const chooseCountry = (id: number) => {
@@ -525,33 +850,6 @@ export default function VirtualNumbers() {
       .catch(() => toast("Could not copy"));
   };
 
-  const smsMutation = useMutation({
-    mutationFn: (orderId: string) =>
-      api.post<SmsResult>(
-        `/api/v1/virtual-numbers/orders/${encodeURIComponent(orderId)}/sms`,
-        undefined,
-        SLOW,
-      ),
-
-    onSuccess: (result) => {
-      setSmsCode(result.sms_code ?? null);
-
-      toast(
-        result.sms_code
-          ? "Code received"
-          : "No code yet. Try again in a few seconds.",
-      );
-
-      void queryClient.invalidateQueries({
-        queryKey: ["vnumber-orders"],
-      });
-    },
-
-    onError: (error) => {
-      toast(friendly(error));
-    },
-  });
-
   const cancelMutation = useMutation({
     mutationFn: (orderId: string) =>
       api.post<Order>(
@@ -570,6 +868,11 @@ export default function VirtualNumbers() {
 
     onError: (error) => {
       toast(friendly(error));
+
+      // The server may have refused because a code just arrived.
+      void queryClient.invalidateQueries({
+        queryKey: ["vnumber-orders"],
+      });
     },
   });
 
@@ -840,10 +1143,17 @@ export default function VirtualNumbers() {
             className="muted small"
             style={{ margin: 0, paddingLeft: 18 }}
           >
-            <li>The number is shown after you pay.</li>
             <li>
-              If the purchase fails, your wallet is refunded
-              automatically.
+              Your money is held while we get your number. You are
+              charged only if a code arrives.
+            </li>
+            <li>
+              The code appears on this page by itself. Once it shows,
+              the order is final and cannot be refunded.
+            </li>
+            <li>
+              If no code arrives before the number expires, or the
+              purchase fails, the hold is released.
             </li>
             <li>Buying can take up to a minute. Keep this page open.</li>
           </ul>
@@ -867,9 +1177,10 @@ export default function VirtualNumbers() {
             ["Country", selectedPrice.country_name],
             ["Service", selectedPrice.service_name],
             ["Number", "Assigned after purchase"],
+            ["Charged", "Only if a code arrives"],
           ]}
           total={formatKobo(selectedPrice.price_kobo)}
-          note="The price is checked with the provider before your wallet is charged. If the result is uncertain, the order stays under confirmation and must not be retried."
+          note="The price is checked with the provider before your money is held. The hold is released if no code arrives. Once a code is delivered, the order is final and cannot be refunded. If the result is uncertain, the order stays under confirmation and must not be retried."
           onPriceChanged={(message) => {
             toast(message);
             void prices.refetch();
@@ -893,42 +1204,14 @@ export default function VirtualNumbers() {
               );
             } finally {
               // Whatever the outcome (success, failure, or "being
-              // confirmed"), the order list must reflect it.
+              // confirmed"), the order list must reflect it. This also
+              // starts the code polling for a new active order.
               void queryClient.invalidateQueries({
                 queryKey: ["vnumber-orders"],
               });
             }
           }}
         />
-      )}
-
-      {/* ---------------- Received code ---------------- */}
-      {smsCode && (
-        <section
-          className="card stack-sm"
-          style={{ border: `1px solid ${palette.accent}` }}
-        >
-          <h2 className="section-title" style={{ margin: 0 }}>
-            Your verification code
-          </h2>
-
-          <strong
-            className="num"
-            style={{
-              fontSize: "var(--t-xl, 28px)",
-              letterSpacing: 2,
-            }}
-          >
-            {smsCode}
-          </strong>
-
-          <Button
-            variant="secondary"
-            onClick={() => copyText(smsCode, "Code copied")}
-          >
-            Copy code
-          </Button>
-        </section>
       )}
 
       {/* ---------------- My numbers ---------------- */}
@@ -959,149 +1242,20 @@ export default function VirtualNumbers() {
           </Empty>
         ) : (
           <div className="stack-sm">
-            {orders.data.map((order) => {
-              const status = normaliseStatus(order.status);
-              const active =
-                status === "ACTIVE" || status === "SMS_RECEIVED";
-              const uncertain =
-                status === "UNKNOWN" || status === "PENDING";
-              const canCheckSms =
-                Boolean(order.phone_number) && active;
-              const canCancel =
-                Boolean(order.phone_number) &&
-                ["ACTIVE", "SMS_RECEIVED"].includes(status);
-
-              return (
-                <article
-                  key={order.id}
-                  className="card stack-sm"
-                >
-                  <div
-                    className="row between"
-                    style={{ alignItems: "center", gap: 12 }}
-                  >
-                    <strong
-                      className="num"
-                      style={{ fontSize: "var(--t-lg, 18px)" }}
-                    >
-                      {order.phone_number ?? "Awaiting number"}
-                    </strong>
-
-                    <StatusBadge
-                      status={
-                        active
-                          ? "SUCCESSFUL"
-                          : uncertain
-                            ? "PENDING"
-                            : status
-                      }
-                    />
-                  </div>
-
-                  <span className="muted small">
-                    {order.service_name} · {order.country_name}
-                  </span>
-
-                  <div className="row between">
-                    <span className="muted xs">
-                      {new Date(order.created_at).toLocaleString()}
-                    </span>
-
-                    <strong className="num">
-                      {formatKobo(order.price_kobo)}
-                    </strong>
-                  </div>
-
-                  {order.sms_code && (
-                    <div className="banner info">
-                      Verification code:{" "}
-                      <strong>{order.sms_code}</strong>
-                    </div>
-                  )}
-
-                  {order.failure_reason && (
-                    <span className="small">
-                      {order.failure_reason}
-                    </span>
-                  )}
-
-                  {uncertain && (
-                    <span className="muted small">
-                      We are confirming this order with the
-                      provider. Please do not buy again yet.
-                    </span>
-                  )}
-
-                  {status === "FAILED" &&
-                    order.refund_status === "REFUNDED" && (
-                      <span className="muted small">
-                        This order failed and your wallet has been
-                        refunded.
-                      </span>
-                    )}
-
-                  {status === "CANCELLED" && (
-                    <span className="muted small">
-                      Cancelled. Refund eligibility depends on the
-                      confirmed provider outcome.
-                    </span>
-                  )}
-
-                  {(canCheckSms || canCancel || order.phone_number) && (
-                    <div className="row wrap" style={{ gap: 8 }}>
-                      {order.phone_number && (
-                        <Button
-                          sm
-                          variant="secondary"
-                          onClick={() =>
-                            copyText(
-                              order.phone_number ?? "",
-                              "Number copied",
-                            )
-                          }
-                        >
-                          Copy number
-                        </Button>
-                      )}
-
-                      {canCheckSms && (
-                        <Button
-                          sm
-                          loading={smsMutation.isPending}
-                          disabled={smsMutation.isPending}
-                          onClick={() => {
-                            setSmsCode(null);
-                            smsMutation.mutate(order.id);
-                          }}
-                        >
-                          Get code
-                        </Button>
-                      )}
-
-                      {canCancel && (
-                        <Button
-                          sm
-                          variant="danger"
-                          loading={cancelMutation.isPending}
-                          disabled={cancelMutation.isPending}
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                "Cancel this number? Cancellation does not guarantee a refund.",
-                              )
-                            ) {
-                              cancelMutation.mutate(order.id);
-                            }
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </article>
-              );
-            })}
+            {orders.data.map((order) => (
+              <OrderCard
+                key={order.id}
+                order={order}
+                checking={orders.isFetching}
+                cancelling={
+                  cancelMutation.isPending &&
+                  cancelMutation.variables === order.id
+                }
+                onCheck={() => void orders.refetch()}
+                onCancel={() => cancelMutation.mutate(order.id)}
+                onCopy={copyText}
+              />
+            ))}
           </div>
         )}
       </section>
