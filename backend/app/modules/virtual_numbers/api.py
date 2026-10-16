@@ -18,7 +18,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.crypto import encrypt
+# NOTE: assumes decrypt(key, token, aad) mirrors encrypt(key, plaintext, aad).
+from app.core.crypto import decrypt, encrypt
 from app.core.deps import get_app_settings, get_db, get_redis, ok
 from app.core.errors import (
     AppError,
@@ -104,6 +105,25 @@ FULFILLED_ORDER_STATUSES = {
     "SMS_RECEIVED",
     "CANCELLED",
 }
+
+# Statuses after which nothing more will happen to the order. Clients use
+# ``is_final`` to decide when it is safe to stop polling / navigate.
+FINAL_ORDER_STATUSES = {
+    "SMS_RECEIVED",
+    "CANCELLED",
+    "FAILED",
+    "EXPIRED",
+}
+
+# A number can be cancelled only after this long without a code.
+CANCEL_AFTER_SECONDS = 120
+
+# The provider's own activation window; used only when the order row does
+# not carry an explicit expiry.
+ACTIVATION_WINDOW_SECONDS = 20 * 60
+
+# The customer polls this endpoint every few seconds while waiting.
+SMS_REFRESH_LIMIT_PER_HOUR = 900
 
 
 class VirtualNumberError(AppError):
@@ -644,18 +664,85 @@ def _service_view(
     ]
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+
+    return value
+
+
+def _assigned_at(order: VirtualNumberOrder) -> datetime | None:
+    """When the provider assigned the number (falls back to created_at)."""
+    explicit = getattr(order, "assigned_at", None)
+
+    return _as_utc(explicit) or _as_utc(order.created_at)
+
+
+def _expires_at(order: VirtualNumberOrder) -> datetime | None:
+    explicit = _as_utc(getattr(order, "expires_at", None))
+
+    if explicit is not None:
+        return explicit
+
+    start = _assigned_at(order)
+
+    if start is None or order.provider_request_id is None:
+        return None
+
+    return start + timedelta(seconds=ACTIVATION_WINDOW_SECONDS)
+
+
+def _cancel_available_at(order: VirtualNumberOrder) -> datetime | None:
+    start = _assigned_at(order)
+
+    if start is None:
+        return None
+
+    return start + timedelta(seconds=CANCEL_AFTER_SECONDS)
+
+
+def _decrypt_code(
+    order: VirtualNumberOrder,
+    settings: Settings,
+) -> str | None:
+    if not order.sms_code:
+        return None
+
+    try:
+        return decrypt(
+            settings.encryption_key.get_secret_value(),
+            order.sms_code,
+            f"virtual-number:{order.id}",
+        )
+
+    except Exception:
+        return None
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 def _view(
     txn: Transaction,
     order: VirtualNumberOrder,
+    sms_code: str | None = None,
 ) -> dict[str, Any]:
     price_kobo = int(order.selling_price_kobo)
+    has_number = order.provider_request_id is not None
 
     return {
         "id": str(order.id),
+        # Alias so clients can read the order id from a purchase response.
+        "order_id": str(order.id),
         "reference": txn.reference,
         "service_type": "VNUMBER",
         "status": order.status,
         "transaction_status": txn.status,
+        "is_final": order.status in FINAL_ORDER_STATUSES,
         "country_id": order.country_id,
         "country_name": order.country_name,
         "application_id": order.application_id,
@@ -664,7 +751,7 @@ def _view(
         "price_kobo": price_kobo,
         "price": Money(price_kobo).naira_str(),
         "currency": "NGN",
-        "sms_code": None,
+        "sms_code": sms_code,
         "failure_reason": order.failure_reason,
         "refund_status": (
             "REFUNDED"
@@ -677,6 +764,11 @@ def _view(
         ),
         "created_at": order.created_at.isoformat(),
         "updated_at": order.updated_at.isoformat(),
+        "assigned_at": _iso(_assigned_at(order)) if has_number else None,
+        "expires_at": _iso(_expires_at(order)) if has_number else None,
+        "cancel_available_at": (
+            _iso(_cancel_available_at(order)) if has_number else None
+        ),
     }
 
 
@@ -684,6 +776,7 @@ async def _fresh_view(
     db: AsyncSession,
     txn: Transaction,
     order: VirtualNumberOrder,
+    sms_code: str | None = None,
 ) -> dict[str, Any]:
     """
     Build the response view after reloading both rows.
@@ -697,7 +790,7 @@ async def _fresh_view(
     await db.refresh(order)
     await db.refresh(txn)
 
-    return _view(txn, order)
+    return _view(txn, order, sms_code)
 
 
 async def _get_order_and_transaction(
@@ -956,7 +1049,11 @@ async def purchase(
             )
 
         return ok(
-            _view(existing_txn, existing_order),
+            _view(
+                existing_txn,
+                existing_order,
+                _decrypt_code(existing_order, settings),
+            ),
             "Existing purchase request returned.",
         )
 
@@ -1432,6 +1529,7 @@ async def purchase(
 async def my_orders(
     principal: Principal = Depends(current_principal),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     rows = (
         await db.execute(
@@ -1454,7 +1552,7 @@ async def my_orders(
     ).all()
 
     return ok([
-        _view(txn, order)
+        _view(txn, order, _decrypt_code(order, settings))
         for order, txn in rows
     ])
 
@@ -1464,6 +1562,7 @@ async def order_detail(
     order_id: uuid.UUID,
     principal: Principal = Depends(current_principal),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     order, txn = await _get_order_and_transaction(
         db,
@@ -1471,7 +1570,7 @@ async def order_detail(
         principal.user.id,
     )
 
-    return ok(_view(txn, order))
+    return ok(_view(txn, order, _decrypt_code(order, settings)))
 
 
 @router.post("/orders/{order_id}/refresh")
@@ -1486,10 +1585,12 @@ async def get_sms(
 ) -> dict[str, Any]:
     _enabled(settings)
 
+    # The customer page polls this every few seconds while a number is
+    # waiting for its code.
     await hit(
         redis,
         f"rl:vnumber:sms:{principal.user.id}",
-        20,
+        SMS_REFRESH_LIMIT_PER_HOUR,
         3600,
     )
 
@@ -1508,6 +1609,18 @@ async def get_sms(
         raise NotFoundError(
             "Virtual number order not found."
         )
+
+    # A code that is already stored never needs another provider call.
+    if order.status == "SMS_RECEIVED":
+        stored = _decrypt_code(order, settings)
+
+        if stored:
+            return ok({
+                "order_id": str(order.id),
+                "status": "SMS_RECEIVED",
+                "sms_code": stored,
+                "is_final": True,
+            })
 
     if (
         order.status not in {"ACTIVE", "SMS_RECEIVED"}
@@ -1537,6 +1650,7 @@ async def get_sms(
                 "order_id": str(order.id),
                 "status": "WAITING",
                 "sms_code": None,
+                "is_final": False,
             })
 
         order.sms_code = encrypt(
@@ -1553,6 +1667,7 @@ async def get_sms(
             "order_id": str(order.id),
             "status": "SMS_RECEIVED",
             "sms_code": code,
+            "is_final": True,
         })
 
     except SMSManError as exc:
@@ -1599,14 +1714,25 @@ async def cancel_order(
             "Virtual number order not found."
         )
 
+    # Once a code has been delivered the order is final: no cancel.
     if (
-        order.status not in {"ACTIVE", "SMS_RECEIVED"}
+        order.status != "ACTIVE"
         or order.provider_request_id is None
     ):
         raise VirtualNumberError(
             "This order cannot be cancelled in its current state.",
             status_code=409,
             code="cancellation_not_allowed",
+        )
+
+    opens_at = _cancel_available_at(order)
+
+    if opens_at is not None and datetime.now(UTC) < opens_at:
+        raise VirtualNumberError(
+            "You can cancel after 2 minutes if no code arrives.",
+            status_code=409,
+            code="cancellation_too_early",
+            details={"cancel_available_at": opens_at.isoformat()},
         )
 
     order.status = "CANCELLING"
