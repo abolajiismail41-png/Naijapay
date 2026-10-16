@@ -3104,3 +3104,597 @@ button.list-row:hover {
     box-shadow: none;
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+/* ==========================================================================
+   Virtual Numbers
+   Mobile first: base styles are for a ~360px phone, wider screens are
+   enhanced with min-width queries. Colours come from the app's existing
+   CSS variables, with fallbacks for a dark theme.
+   ========================================================================== */
+
+.vn {
+  --vn-accent: var(--primary, var(--accent, #34d399));
+  --vn-on-accent: var(--on-primary, #06251b);
+  --vn-border: var(--border, rgba(255, 255, 255, 0.14));
+  --vn-surface: var(--surface, rgba(255, 255, 255, 0.04));
+  --vn-raised: var(--surface-2, rgba(255, 255, 255, 0.07));
+  --vn-muted: var(--muted, rgba(255, 255, 255, 0.62));
+  --vn-radius: var(--r, 14px);
+  --vn-row: 56px;
+  --vn-ok: #34d399;
+  --vn-bad: #f87171;
+  --vn-idle: rgba(255, 255, 255, 0.35);
+
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 640px;
+  margin-inline: auto;
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+}
+
+.vn *,
+.vn *::before,
+.vn *::after {
+  box-sizing: border-box;
+}
+
+.vn h2,
+.vn p,
+.vn dl,
+.vn dd,
+.vn ol,
+.vn ul {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cards                                                               */
+/* ------------------------------------------------------------------ */
+
+.vn-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--vn-surface);
+  border: 1px solid var(--vn-border);
+  border-radius: var(--vn-radius);
+}
+
+.vn-card[data-emphasis="true"] {
+  border-color: var(--vn-accent);
+}
+
+.vn-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.vn-card-title {
+  font-size: var(--t-md, 16px);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.vn-hint {
+  color: var(--vn-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.vn-section-title {
+  font-size: var(--t-md, 16px);
+  font-weight: 700;
+  padding-inline: 2px;
+}
+
+.vn-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Progress steps                                                      */
+/* ------------------------------------------------------------------ */
+
+.vn-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.vn-step {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--vn-muted);
+}
+
+.vn-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: calc(50% + 20px);
+  width: calc(100% - 40px);
+  height: 2px;
+  border-radius: 2px;
+  background: var(--vn-border);
+}
+
+.vn-step[data-state="done"]:not(:last-child)::after {
+  background: var(--vn-accent);
+}
+
+.vn-step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--vn-raised);
+  border: 1px solid var(--vn-border);
+}
+
+.vn-step[data-state="current"] {
+  color: inherit;
+  font-weight: 600;
+}
+
+.vn-step[data-state="current"] .vn-step-dot {
+  border-color: var(--vn-accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vn-accent) 22%, transparent);
+}
+
+.vn-step[data-state="done"] .vn-step-dot {
+  background: var(--vn-accent);
+  border-color: var(--vn-accent);
+  color: var(--vn-on-accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pickers                                                             */
+/* ------------------------------------------------------------------ */
+
+.vn-search {
+  width: 100%;
+}
+
+.vn-list {
+  max-height: calc(var(--vn-row) * 6);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--vn-border);
+  border-radius: var(--vn-radius);
+}
+
+.vn-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: var(--vn-row);
+  padding: 8px 14px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--vn-border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vn-row:last-child {
+  border-bottom: 0;
+}
+
+.vn-row:hover:not(:disabled) {
+  background: var(--vn-raised);
+}
+
+.vn-row[aria-pressed="true"] {
+  background: var(--vn-raised);
+  border-left-color: var(--vn-accent);
+}
+
+.vn-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vn-row:focus-visible,
+.vn-back:focus-visible {
+  outline: 2px solid var(--vn-accent);
+  outline-offset: -2px;
+}
+
+.vn-row-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vn-row-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vn-row-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vn-muted);
+  font-size: 12px;
+}
+
+.vn-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vn-idle);
+}
+
+.vn-row-sub[data-stock="in"] .vn-dot {
+  background: var(--vn-ok);
+}
+
+.vn-row-sub[data-stock="out"] .vn-dot {
+  background: var(--vn-bad);
+}
+
+.vn-row-right {
+  flex: none;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.vn-row-check {
+  flex: none;
+  color: var(--vn-accent);
+  font-weight: 700;
+}
+
+.vn-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--vn-raised);
+  border: 1px solid var(--vn-border);
+  border-radius: var(--vn-radius);
+}
+
+.vn-summary-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vn-summary-label {
+  color: var(--vn-muted);
+  font-size: 12px;
+}
+
+.vn-summary-value {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Key / value lists                                                   */
+/* ------------------------------------------------------------------ */
+
+.vn-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vn-kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.vn-kv-row dt {
+  flex: none;
+  color: var(--vn-muted);
+}
+
+.vn-kv-row dd {
+  min-width: 0;
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.vn-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--vn-border);
+}
+
+.vn-total strong {
+  font-size: var(--t-xl, 24px);
+  line-height: 1.1;
+}
+
+.vn-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  color: var(--vn-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  list-style: none;
+}
+
+.vn-notes li {
+  position: relative;
+  padding-left: 18px;
+}
+
+.vn-notes li::before {
+  content: "";
+  position: absolute;
+  top: 0.55em;
+  left: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vn-accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* My numbers                                                          */
+/* ------------------------------------------------------------------ */
+
+.vn-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vn-order {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--vn-surface);
+  border: 1px solid var(--vn-border);
+  border-radius: var(--vn-radius);
+}
+
+.vn-order-number {
+  min-width: 0;
+  font-size: var(--t-lg, 18px);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.vn-order-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vn-code-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(52, 211, 153, 0.12);
+  background: color-mix(in srgb, var(--vn-accent) 14%, transparent);
+}
+
+.vn-code-chip strong {
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/* Number view                                                         */
+/* ------------------------------------------------------------------ */
+
+.vn-back {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 12px 0 8px;
+  background: transparent;
+  border: 1px solid var(--vn-border);
+  border-radius: 999px;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.vn-number {
+  font-size: clamp(24px, 8vw, 32px);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.vn-code {
+  font-size: clamp(30px, 11vw, 44px);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.16em;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.vn-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.vn-status-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vn-pulse {
+  position: relative;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--vn-accent);
+}
+
+.vn-pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--vn-accent);
+  animation: vn-pulse 1.6s ease-out infinite;
+}
+
+@keyframes vn-pulse {
+  from {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+.vn-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--vn-raised);
+}
+
+.vn-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--vn-accent);
+  transition: width 1s linear;
+}
+
+.vn-countdown {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.vn-countdown strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vn-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.vn-link {
+  align-self: flex-start;
+  color: var(--vn-accent);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.vn-link:hover {
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------------------ */
+/* Wider screens                                                       */
+/* ------------------------------------------------------------------ */
+
+@media (min-width: 640px) {
+  .vn {
+    gap: 20px;
+  }
+
+  .vn-card {
+    padding: 20px;
+  }
+
+  .vn-order {
+    padding: 16px;
+  }
+
+  .vn-actions[data-cols="2"] {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vn-pulse::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .vn-progress > span {
+    transition: none;
+  }
+}
