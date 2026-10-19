@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   useMutation,
   useQuery,
@@ -82,7 +83,8 @@ type Order = {
 };
 
 // The purchase response should carry the new order's id so the page can
-// open it straight away.
+// open it straight away. If it does not, the page finds the new order
+// by comparing the orders list before and after the purchase.
 type PurchaseResult = Txn & { order_id?: string | null };
 
 type PricedService = {
@@ -93,6 +95,9 @@ type PricedService = {
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
+
+// Where "Done" sends the customer. Change to your real route.
+const TRANSACTIONS_PATH = "/transactions";
 
 const SERVICE_SEARCH_MIN_LENGTH = 2;
 const MAX_SERVICE_RESULTS = 200;
@@ -134,11 +139,12 @@ const CONFIRMING_POLL_MS = 10_000;
 /* Styles                                                              */
 /* ------------------------------------------------------------------ */
 
+// Token names match the app's design system (--line, --accent, --r-md).
 const palette = {
-  border: "1px solid var(--border, rgba(255,255,255,0.14))",
+  border: "1px solid var(--line, rgba(255,255,255,0.14))",
   surface: "var(--surface-2, rgba(255,255,255,0.05))",
-  accent: "var(--primary, var(--accent, #34d399))",
-  radius: "var(--r, 14px)",
+  accent: "var(--accent, #34d399)",
+  radius: "var(--r-md, 14px)",
 };
 
 const pickerBox: CSSProperties = {
@@ -177,6 +183,18 @@ function isConfirming(order: Order): boolean {
   const status = normaliseStatus(order.status);
 
   return status === "UNKNOWN" || status === "PENDING";
+}
+
+// Order has reached an end state, so the customer can move on.
+function isFinished(order: Order): boolean {
+  const status = normaliseStatus(order.status);
+
+  return (
+    hasCode(order) ||
+    status === "FAILED" ||
+    status === "EXPIRED" ||
+    status === "CANCELLED"
+  );
 }
 
 function badgeStatus(order: Order): string {
@@ -287,7 +305,7 @@ function StepHeader({
             fontSize: 13,
             fontWeight: 700,
             background: done ? palette.accent : palette.surface,
-            color: done ? "#06251b" : "inherit",
+            color: done ? "var(--on-accent, #06251b)" : "inherit",
             border: done ? "none" : palette.border,
           }}
         >
@@ -369,7 +387,7 @@ function PickerRow({
         borderLeft: selected
           ? `3px solid ${palette.accent}`
           : "3px solid transparent",
-        borderBottom: "1px solid var(--border, rgba(255,255,255,0.08))",
+        borderBottom: "1px solid var(--line, rgba(255,255,255,0.08))",
       }}
     >
       <span style={{ flex: 1, minWidth: 0 }}>
@@ -535,6 +553,7 @@ function NumberView({
   onRefresh,
   onCancel,
   onCopy,
+  onDone,
 }: {
   order: Order | undefined;
   loading: boolean;
@@ -544,6 +563,7 @@ function NumberView({
   onRefresh: () => void;
   onCancel: () => void;
   onCopy: (value: string, message: string) => void;
+  onDone: () => void;
 }) {
   const waiting = order ? isWaiting(order) : false;
   const now = useNow(waiting);
@@ -582,6 +602,7 @@ function NumberView({
   const status = normaliseStatus(order.status);
   const received = hasCode(order);
   const confirming = isConfirming(order);
+  const finished = isFinished(order);
   const refunded = order.refund_status === "REFUNDED";
 
   const opensAt = cancelOpensAt(order);
@@ -795,6 +816,13 @@ function NumberView({
         </section>
       )}
 
+      {/* ---------------- Done: go to transactions ---------------- */}
+      {finished && (
+        <Button block onClick={onDone}>
+          {received ? "Done, view transactions" : "View transactions"}
+        </Button>
+      )}
+
       {/* ---------------- Details ---------------- */}
       <section className="card stack-sm">
         <div className="row between">
@@ -840,6 +868,7 @@ export default function VirtualNumbers() {
 
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const countries = useQuery({
     queryKey: ["vnumber-countries"],
@@ -1071,6 +1100,10 @@ export default function VirtualNumbers() {
           onRefresh={() => void orders.refetch()}
           onCancel={() => cancelMutation.mutate(viewingId)}
           onCopy={copyText}
+          onDone={() => {
+            setViewingId(null);
+            navigate(TRANSACTIONS_PATH);
+          }}
         />
       ) : (
         <>
@@ -1357,7 +1390,6 @@ export default function VirtualNumbers() {
             </section>
           )}
 
-
           {/* ---------------- My numbers ---------------- */}
           <section className="stack-sm">
             <h2 className="section-title">My numbers</h2>
@@ -1405,6 +1437,7 @@ export default function VirtualNumbers() {
           onClose={() => {
             setReview(false);
 
+            // After a purchase, open the number screen inline.
             if (purchasedOrderId.current) {
               setViewingId(purchasedOrderId.current);
               purchasedOrderId.current = null;
@@ -1424,6 +1457,15 @@ export default function VirtualNumbers() {
             void prices.refetch();
           }}
           submit={async ({ pinToken, idempotencyKey }) => {
+            // Orders that existed before this purchase, used to find the
+            // new one if the response does not carry its id.
+            const before = new Set(
+              (
+                queryClient.getQueryData<Order[]>(["vnumber-orders"]) ??
+                []
+              ).map((item) => item.id),
+            );
+
             try {
               const result = await api.post<PurchaseResult>(
                 "/api/v1/virtual-numbers/orders",
@@ -1441,8 +1483,27 @@ export default function VirtualNumbers() {
                 },
               );
 
+              let orderId = result.order_id ?? null;
+
+              // Fallback: the order that did not exist before.
+              if (!orderId) {
+                try {
+                  const fresh = await queryClient.fetchQuery({
+                    queryKey: ["vnumber-orders"],
+                    queryFn: () =>
+                      api.get<Order[]>("/api/v1/virtual-numbers/orders"),
+                    staleTime: 0,
+                  });
+
+                  orderId =
+                    fresh.find((item) => !before.has(item.id))?.id ?? null;
+                } catch {
+                  orderId = null;
+                }
+              }
+
               // Remember the new order. It opens when the sheet closes.
-              purchasedOrderId.current = result.order_id ?? null;
+              purchasedOrderId.current = orderId;
 
               return result;
             } finally {
