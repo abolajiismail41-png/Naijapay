@@ -97,7 +97,7 @@ type PricedService = {
 /* ------------------------------------------------------------------ */
 
 // Where "Done" sends the customer. Change to your real route.
-const TRANSACTIONS_PATH = "/transactions";
+const TRANSACTIONS_PATH = "/activity";
 
 const SERVICE_SEARCH_MIN_LENGTH = 2;
 const MAX_SERVICE_RESULTS = 200;
@@ -1433,6 +1433,7 @@ export default function VirtualNumbers() {
 
       {selectedPrice && (
         <ReviewSheet
+          navigateOnSuccess={false}
           open={review}
           onClose={() => {
             setReview(false);
