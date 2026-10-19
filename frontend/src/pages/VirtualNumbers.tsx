@@ -1004,6 +1004,8 @@ export default function VirtualNumbers() {
           order={viewingOrder}
           loading={orders.isPending}
           refreshing={orders.isFetching}
+          onBack={() => setViewingId(null)}
+          onRefresh={() => void orders.refetch()}
           onCopy={copyText}
           onDone={() => {
             setViewingId(null);
