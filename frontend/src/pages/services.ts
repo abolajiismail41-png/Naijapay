@@ -1,4 +1,4 @@
-import { BoltIcon, CapIcon, PhoneIcon, SignalIcon, TvIcon } from "../components/icons";
+import { BoltIcon, CapIcon, PhoneIcon, SignalIcon, TvIcon, SmsIcon } from "../components/icons";
 
 export const SERVICES = [
   { key: "airtime", title: "Airtime", sub: "MTN, Airtel, Glo, 9mobile", to: "/pay/airtime", Icon: PhoneIcon },
