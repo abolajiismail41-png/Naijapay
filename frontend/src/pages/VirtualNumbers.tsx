@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -128,9 +127,6 @@ const POPULAR_SERVICES = [
 // slow-request timeout. Everything else keeps the default.
 const SLOW = { timeoutMs: SLOW_REQUEST_TIMEOUT_MS };
 
-// The customer can cancel only after this long without a code.
-const CANCEL_AFTER_MS = 2 * 60 * 1000;
-
 // How often the orders list refreshes while something is in flight.
 const WAITING_POLL_MS = 5_000;
 const CONFIRMING_POLL_MS = 10_000;
@@ -202,19 +198,6 @@ function badgeStatus(order: Order): string {
   if (isWaiting(order) || isConfirming(order)) return "PENDING";
 
   return normaliseStatus(order.status);
-}
-
-// Epoch ms when cancelling opens, or null if it cannot be worked out.
-function cancelOpensAt(order: Order): number | null {
-  const explicit = order.cancel_available_at
-    ? new Date(order.cancel_available_at).getTime()
-    : NaN;
-
-  if (!Number.isNaN(explicit)) return explicit;
-
-  const start = new Date(order.assigned_at ?? order.created_at).getTime();
-
-  return Number.isNaN(start) ? null : start + CANCEL_AFTER_MS;
 }
 
 // 125000 -> "2:05"
@@ -548,20 +531,16 @@ function NumberView({
   order,
   loading,
   refreshing,
-  cancelling,
   onBack,
   onRefresh,
-  onCancel,
   onCopy,
   onDone,
 }: {
   order: Order | undefined;
   loading: boolean;
   refreshing: boolean;
-  cancelling: boolean;
   onBack: () => void;
   onRefresh: () => void;
-  onCancel: () => void;
   onCopy: (value: string, message: string) => void;
   onDone: () => void;
 }) {
@@ -605,16 +584,9 @@ function NumberView({
   const finished = isFinished(order);
   const refunded = order.refund_status === "REFUNDED";
 
-  const opensAt = cancelOpensAt(order);
-  const cancelWaitMs = opensAt === null ? 0 : opensAt - now;
-  const cancelOpen = cancelWaitMs <= 0;
-
   const expiresMs = order.expires_at
     ? new Date(order.expires_at).getTime() - now
     : null;
-
-  // A code makes the order final, so cancel only exists while waiting.
-  const canCancel = waiting && Boolean(order.phone_number);
 
   return (
     <>
@@ -778,41 +750,6 @@ function NumberView({
               ? "Your money has been returned to your wallet."
               : "Your held money is released once the provider confirms."}
           </p>
-        </section>
-      )}
-
-      {/* ---------------- Cancel (after 2 minutes, no code) ---------------- */}
-      {canCancel && (
-        <section className="card stack-sm">
-          <h2 className="section-title" style={{ margin: 0 }}>
-            Not getting a code?
-          </h2>
-
-          <p className="muted small" style={{ margin: 0 }}>
-            {cancelOpen
-              ? "No code has arrived. You can cancel and get your money back."
-              : "You can cancel after 2 minutes if no code arrives."}
-          </p>
-
-          <Button
-            block
-            variant="danger"
-            loading={cancelling}
-            disabled={!cancelOpen || cancelling}
-            onClick={() => {
-              if (
-                window.confirm(
-                  "Cancel this number? Your money is returned if no code has arrived yet.",
-                )
-              ) {
-                onCancel();
-              }
-            }}
-          >
-            {cancelOpen
-              ? "Cancel number"
-              : `Cancel in ${formatClock(cancelWaitMs)}`}
-          </Button>
         </section>
       )}
 
@@ -1047,31 +984,6 @@ export default function VirtualNumbers() {
       .catch(() => toast("Could not copy"));
   };
 
-  const cancelMutation = useMutation({
-    mutationFn: (orderId: string) =>
-      api.post<Order>(
-        `/api/v1/virtual-numbers/orders/${encodeURIComponent(orderId)}/cancel`,
-        undefined,
-        SLOW,
-      ),
-
-    onSuccess: () => {
-      toast("Cancellation request submitted");
-    },
-
-    onError: (error) => {
-      // The server may refuse because a code just arrived, or because
-      // two minutes have not passed on its clock.
-      toast(friendly(error));
-    },
-
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["vnumber-orders"],
-      });
-    },
-  });
-
   const viewingOrder =
     viewingId !== null
       ? orders.data?.find((item) => item.id === viewingId)
@@ -1092,13 +1004,6 @@ export default function VirtualNumbers() {
           order={viewingOrder}
           loading={orders.isPending}
           refreshing={orders.isFetching}
-          cancelling={
-            cancelMutation.isPending &&
-            cancelMutation.variables === viewingId
-          }
-          onBack={() => setViewingId(null)}
-          onRefresh={() => void orders.refetch()}
-          onCancel={() => cancelMutation.mutate(viewingId)}
           onCopy={copyText}
           onDone={() => {
             setViewingId(null);
@@ -1374,8 +1279,8 @@ export default function VirtualNumbers() {
                   cannot be refunded.
                 </li>
                 <li>
-                  No code? You can cancel after 2 minutes. If the number
-                  expires or the purchase fails, the hold is released.
+                  If no code arrives or the purchase fails, the hold is
+                  released.
                 </li>
                 <li>Buying can take up to a minute. Keep this page open.</li>
               </ul>
@@ -1452,7 +1357,7 @@ export default function VirtualNumbers() {
             ["Charged", "Only if a code arrives"],
           ]}
           total={formatKobo(selectedPrice.price_kobo)}
-          note="The price is checked with the provider before your money is held. The hold is released if no code arrives. You can cancel after 2 minutes if no code arrives. Once a code is delivered, the order is final and cannot be refunded. If the result is uncertain, the order stays under confirmation and must not be retried."
+          note="The price is checked with the provider before your money is held. The hold is released if no code arrives. Once a code is delivered, the order is final and cannot be refunded. If the result is uncertain, the order stays under confirmation and must not be retried."
           onPriceChanged={(message) => {
             toast(message);
             void prices.refetch();
