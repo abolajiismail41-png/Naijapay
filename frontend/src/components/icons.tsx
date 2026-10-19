@@ -24,3 +24,6 @@ export const BackIcon = I("M15 6l-6 6 6 6");
 export const TvIcon = (p: P) => <svg {...base} {...p}><rect x="3" y="6" width="18" height="13" rx="2" /><path d="M8 2l4 4 4-4M9 23h6" /></svg>;
 
 export const BellIcon = I("M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4");
+
+export const SmsIcon = (p: P) => <svg {...base} {...p}><path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 4V6a1 1 0 0 1 1-1z" /><path d="M8 10h8M8 13h5" /></svg>;
+
