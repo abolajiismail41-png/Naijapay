@@ -6,5 +6,5 @@ export const SERVICES = [
   { key: "electricity", title: "Electricity", sub: "Prepaid and postpaid meters", to: "/pay/electricity", Icon: BoltIcon },
   { key: "exam", title: "Exam PINs", sub: "WAEC and NECO result checkers", to: "/pay/exam-pins", Icon: CapIcon },
   { key: "tv", title: "TV subscriptions", sub: "DStv, GOtv and StarTimes packages", to: "/pay/tv", Icon: TvIcon },
-  { key: "number", title: "Sms verifications", sub: "sms verifications numbers", to: "/pay/virtual-numbers", Icon: SmsIcon },
+  { key: "number", title: "Number verifications", sub: "sms verification numbers", to: "/pay/virtual-numbers", Icon: SmsIcon },
 ] as const;
